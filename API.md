@@ -273,7 +273,11 @@ it takes effect with the next job header.
 MO leads PA. MO asserts on the header, PA only once the first lit vector
 executes, so the gap is however long the host takes to deliver that vector:
 41 ms with the header and vectors in a single write, 542 ms with a deliberate
-500 ms wait between them. The ~40 ms floor is engine start latency. On the way
+500 ms wait between them. The floor is engine start latency and it quantises in
+steps of about 41 ms, landing on 41 or 82 depending on the run, so treat single
+measurements as approximate. Adding unrelated parameter commands to the header
+does not change it (0, 1, 2 and 3 copies all measured the same), but `0x0206`
+adds a repeatable 60 ms. On the way
 down PA drops when the vectors stop and MO follows at the reset, about 39 ms
 later, and that gap is constant. `0x0211` Param2 is documented as an MO delay
 but changing it does not move any of this.

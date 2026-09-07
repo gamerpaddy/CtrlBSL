@@ -72,8 +72,12 @@ LASERS = {
     GREEN: Laser(GREEN, 0x44, "pwm", 30.0, (1.0, 40.0), verified=False),
     MOPA: Laser(MOPA, 0x55, "byte", 30.0, (1.0, 40.0), mopa_pulse=True,
                 verified=False,
-                note="Pulse width is a separate setting, 0x0206. Config allows "
-                     "1 kHz to 2 MHz, far above anything measured here."),
+                note="Pulse width is a separate setting, 0x0206. WARNING: on "
+                     "the board tested, type code 0x55 mutes every laser "
+                     "output. PRR, P0, MO and PA all stay dead, while the "
+                     "same job under the fiber code 0x11 drives all four. "
+                     "0x0206 itself works fine under 0x11, so a MOPA source "
+                     "may be better driven as FIBER with mopa_pulse set."),
     YAG: Laser(YAG, 0x00, "pwm", 20.0, (1.0, 40.0), verified=False,
                note="Type code is a guess: it is the only unused low nibble and "
                     "was never confirmed on hardware."),

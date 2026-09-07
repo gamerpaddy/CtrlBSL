@@ -76,7 +76,7 @@ with Job(FIBER) as j:
 | `FIBER` | `0x11` | byte on P0..P7 | latched, PLATCH strobes on change, verified |
 | `UV` | `0x33` | PWM duty | code unverified |
 | `GREEN` | `0x44` | PWM duty | code unverified |
-| `MOPA` | `0x55` | byte on P0..P7 | has a pulse-width setting, code unverified |
+| `MOPA` | `0x55` | byte on P0..P7 | has a pulse-width setting. **Code 0x55 mutes every output on the board tested**, see below |
 | `YAG` | `0x00` | PWM duty | code is a guess, never confirmed |
 
 `configure()` rejects a frequency outside the type's range, a tickle on a laser
@@ -94,9 +94,24 @@ with Job(MOPA) as j:
     j.configure(freq_khz=30, power_byte=0x80, mopa_pulse=20)
 ```
 
-`j.mopa_pulse(value)` sets it immediately instead of at the next job. Both are
-**untested**. There is no MOPA laser
-here to measure.
+`j.mopa_pulse(value)` sets it immediately instead of at the next job.
+
+On the board tested, laser type `0x55` **mutes every laser output**: PRR, P0, MO
+and PA all stay dead, while the identical job under the fiber code `0x11` drives
+all four. The `0x0206` command itself works fine under `0x11`, so until someone
+confirms `0x55` on another board, drive a MOPA source as `FIBER` and set
+`mopa_pulse`:
+
+```python
+with Job(FIBER) as j:
+    j.configure(freq_khz=30, power_byte=0x80, mo=True)
+    j.mopa_pulse(120)
+```
+
+The width itself is still unverified. `0x0206` is demonstrably processed, it
+costs a repeatable 60 ms in the job header, but that cost is identical for
+values 1, 120, 500 and 60000 and for every Param0 tried, so nothing here
+confirms what the value does. There is no MOPA laser here to measure.
 
 ---
 
