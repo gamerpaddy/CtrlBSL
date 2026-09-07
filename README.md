@@ -156,11 +156,32 @@ Verified on hardware with a scope.
 
 ## Safety
 
-`guard()` polls SGIN over USB, roughly 4 to 8 ms per round trip, and it dies with
-the host process. **It is not an interlock.** E-stop belongs in hardware.
+**Laser outputs latch.** Setting a power level puts a live signal on the laser
+control pin and leaves it there: it is a level, not a one-shot, and it persists
+until it is cleared or the board is power cycled. A plain reset does **not**
+stop it.
 
-The CO2 tickle generator is free-running: it keeps pulsing after your script
-exits. `close()` switches it off, a killed process does not.
+To stop everything, at any time:
+
+```bash
+python -m dbk2jp off
+```
+
+```python
+j.laser_off()          # marking PWM, tickle and gate, all off
+```
+
+`close()` does this automatically for any job that programmed an output, and
+`with Job(...)` calls `close()`. A script that exits without either still gets
+caught by an exit hook. A hard kill does not, and neither does pulling the USB
+cable while output is live.
+
+`guard()` polls SGIN over USB, roughly 4 to 8 ms per round trip, and it dies with
+the host process. **It is not an interlock.** E-stop belongs in hardware, and so
+does anything that has to be true when the software is not running.
+
+The CO2 tickle generator is free-running and behaves the same way: it keeps
+pulsing after the job ends.
 
 ---
 

@@ -246,12 +246,20 @@ See EXAMPLES.md.
 | `mo(on)` / `laser_port_switch(...)` | MO command pair / port switch |
 | `running()` | engine started (`0x0101` byte 2 bit 3). **Not** "still marking" |
 | `free_cache()` | free queue slots, **0 to 256** |
-| `stop()` / `close(quiet=None)` | reset; `close` switches the tickle off if this job started it |
+| `laser_off()` | silence every laser output: marking PWM, tickle, gate |
+| `stop()` / `close(quiet=True)` | `close` runs `laser_off()` for any job that programmed an output |
 
 There is **no job-complete indicator**. `running()` is set by `0x0104` and stays
 set until a reset, and `free_cache()` reads idle even while vectors are
 executing. Time your own waits; `axis_move()` returns its expected duration for
 exactly this reason.
+
+**Laser outputs latch.** A power level stays on the laser control pin until it
+is cleared; a plain reset does not clear it, the generator has to be zeroed
+through the EP 0x02 header. `laser_off()` does that, `close()` calls it, and an
+exit hook catches a script that exits without either. Order matters inside
+`laser_off()`: arming before zeroing restarts the engine with the old values
+loaded and emits a burst.
 
 `mo()` has no observable effect on pin 18: the marking engine asserts MO by
 itself and the pin tracks engine activity, not lasing.

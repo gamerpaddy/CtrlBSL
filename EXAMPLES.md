@@ -160,6 +160,10 @@ j.configure(power_pct=50)        # 127, not 128
 **Set the power word without marking.** Useful for bringing the laser up to a
 known level, or for bit-level testing of the P0..P7 wiring.
 
+This leaves a **live signal on the laser control output** until it is cleared.
+It is a power level, not a pulse. Clear it with `j.laser_off()`, or let
+`close()` do it, or run `python -m dbk2jp off`.
+
 ```python
 with Job(FIBER) as j:
     j.power_byte(0x01)           # P0 only
@@ -521,6 +525,21 @@ with Job(CO2) as j:
     if not j.guard(2.0):                        # polls SGIN, aborts if it asserts
         print("laser fault, aborted")
 ```
+
+### Stopping everything
+
+```python
+j.laser_off()      # marking PWM, tickle and gate, all off
+```
+
+```bash
+python -m dbk2jp off
+```
+
+Laser outputs are levels and they latch. A plain reset does not clear them.
+`close()` runs this for any job that programmed an output, `with Job(...)` calls
+`close()`, and an exit hook catches a script that does neither. A hard kill is
+not caught.
 
 SGIN0, SGIN1 and SGIN2 are OR'd into a single bit, so you learn *that* a fault
 fired, never *which*. `guard()` polls over USB, roughly 4 to 8 ms per round trip,

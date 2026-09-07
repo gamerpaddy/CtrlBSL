@@ -13,6 +13,7 @@ board ACKs parameter commands on EP 0x06 and then silently ignores them.
         j.pwm_burst(seconds=10)          # continuous PWM for scope work
 """
 
+import atexit
 import time
 
 from . import protocol as S
@@ -41,7 +42,14 @@ class Job:
                  field=None):
         self.b = board if board is not None else Board(index=index)
         self.field = field if field is not None else Field()
+        self._live = False          # has this job programmed a laser output?
+        self._closed = False
         self.select(laser)
+        # Last-resort net: an interpreter that exits without close() -- an
+        # unhandled exception, a bare script with no "with" -- still silences
+        # the board. A hard kill cannot be caught, so this is not a substitute
+        # for close(), and neither is a substitute for a hardware interlock.
+        atexit.register(self._atexit)
         if unlock_now:
             self.ensure_unlocked()
 
@@ -212,6 +220,7 @@ class Job:
         UNTESTED -- no MOPA laser here to measure.
         """
         self._mopa_pulse = value
+        self._live = True
         self.b.write_data(S.cmd(0x0206, 0xA501, value & 0xFFFF, 0, 0, 0))
         return value
 
@@ -254,7 +263,8 @@ class Job:
 
     def _header(self):
         if self.laser.power == "byte":
-            pwr = S.set_power_raw(self._freq, self._power_byte)
+            pwr = S.set_power_raw(self._freq, self._power_byte,
+                                  duty_pct=self._power)
         else:
             pwr = S.set_power_0210(self._freq, self._power)[0]
         tk = getattr(self, "_tick_khz", self._freq)
@@ -268,6 +278,7 @@ class Job:
         h += S.cmd(0x0217, 0x0100 if self._tickle else 0x0000,
                    tperiod & 0xFFFF, twidth & 0xFFFF, 0, 0)
         h += S.cmd(0x0208, 0, 0, 0, 0, 0)
+        self._live = True          # this header programs a laser output
         return h
 
     # ---- execution ------------------------------------------------------
@@ -277,6 +288,7 @@ class Job:
         self._cmd(S.cmd(0x0105))
         self._cmd(S.cmd(0x0104))
         blob = self._header() + S.cmd(0x0241, speed, start[0], start[1], 0, 500)
+        self._live = True
         self.b.write_data(blob)
 
     def lines(self, points, speed=200):
@@ -382,6 +394,12 @@ class Job:
     def power_byte(self, value, freq_khz=None):
         """Fiber parallel power word P0..P7 (0x0210 Param3 low byte).
 
+        WARNING: this puts a LIVE SIGNAL on the laser control output and leaves
+        it there. It is a power level, not a one-shot, so it persists until
+        laser_off(), close(), or a power cycle. On a machine whose laser
+        control pin is PWM, the level appears there as a continuous modulated
+        signal at the configured frequency.
+
         Static and latched -- no marking run needed -- and the board strobes
         PLATCH on every change so the laser clocks the new word.
 
@@ -396,6 +414,7 @@ class Job:
         blob = S.cmd(0x0211, (self.laser_type << 8), 0, 0, 0, 0)
         blob += S.set_power_raw(f, value & 0xFF)
         blob += S.cmd(0x0208, 0, 0, 0, 0, 0)
+        self._live = True
         self.b.write_data(blob)
         return value & 0xFF
 
@@ -417,6 +436,7 @@ class Job:
         blob += S.cmd(0x0208, 0, 0, 0, 0, 0)
         if mark:
             blob += S.cmd(0x0241, 200, 0x4000, CENTRE, 0, 500)
+        self._live = True
         self.b.write_data(blob)
         return value12 & 0x0FFF
 
@@ -619,19 +639,64 @@ class Job:
             time.sleep(poll)
         return True
 
-    def close(self, quiet=None):
-        """Leaves the board idle and silent: tickle off, then reset.
+    def _atexit(self):
+        if self._closed or not self._live:
+            return
+        try:
+            self.laser_off()
+        except Exception:
+            pass
 
-        `quiet` defaults to "only if this job actually started the tickle" --
-        the generator is free-running, so a job that enabled it must switch it
-        off, but a read-only session should not write to the board on the way
-        out.
+    def laser_off(self):
+        """Silence every laser output: marking PWM, tickle, gate.
+
+        A plain reset (0x0105) does NOT stop the marking PWM generator: once
+        0x0210 has programmed a period and width and the engine has been
+        started, the pin keeps modulating. The generator has to be zeroed
+        through the EP 0x02 header like any other parameter, and only then
+        reset. Order matters: arming first would restart the engine with the
+        old values still loaded and emit a burst on the way down.
+        """
+        blob = S.cmd(S.CMD_POWER, 0, 0, 0, 0, 0)       # period, width, power = 0
+        blob += S.cmd(S.CMD_TICK, 0x0000, 0, 0, 0, 0)  # tickle disabled
+        blob += S.cmd(S.CMD_LASER_GATE, 0, 0, 0, 0, 0)
+        try:
+            # Zero the generator FIRST, with the engine in whatever state it is
+            # already in. Sending 0x0104 to "arm" before this restarts the
+            # engine with the PWM values still loaded and puts a burst on the
+            # pin, which is exactly what this method exists to prevent.
+            self.b.write_data(blob)
+            time.sleep(0.05)
+        except Exception:
+            pass
+        finally:
+            self._tickle = False
+            self._live = False
+            try:
+                self._cmd(S.cmd(S.CMD_CLEAR_CACHE))
+                self._cmd(S.cmd(S.CMD_RESET))
+            except Exception:
+                pass
+
+    def close(self, quiet=True):
+        """Leave the board silent: every laser output off, then reset.
+
+        Any job that programmed a laser output gets silenced, whether or not it
+        used the tickle. An earlier version only switched the tickle off, and
+        only when that job had turned it on, so the marking PWM was left running
+        on the laser control pin after a job that had set a power level.
+
+        A session that never programmed an output writes nothing, so reading
+        status does not disturb a mark already running from elsewhere. Pass
+        quiet=False to skip the shutdown entirely.
         """
         try:
-            if self._tickle if quiet is None else quiet:
-                self.tick_off()
-            self.stop()
+            if quiet and self._live:
+                self.laser_off()
+            else:
+                self.stop()
         finally:
+            self._closed = True
             self.b.close()
 
     def __enter__(self):

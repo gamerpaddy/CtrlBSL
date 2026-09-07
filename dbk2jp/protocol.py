@@ -69,15 +69,21 @@ def set_power_0210(freq_khz, power_pct, wait=0):
     return cmd(0x0210, 0, p1 & 0xFFFF, p2 & 0xFFFF, p3 & 0xFFFF, wait), period, width
 
 
-def set_power_raw(freq_khz, power_byte, wait=0):
+def set_power_raw(freq_khz, power_byte, wait=0, duty_pct=0.0):
     """0x0210 with an EXPLICIT 8-bit power word instead of a percentage.
 
     For fiber, that byte is what appears on the parallel power pins P0..P7, so
     driving it directly lets you exercise one bit at a time. Packing is
     identical to set_power_0210; only the power byte differs.
+
+    `duty_pct` is the PWM duty on the MARKING line and defaults to 0. That
+    matters: this command programs the marking PWM generator whatever else it
+    is being used for, so a non-zero default puts a live modulated signal on
+    the laser control pin of any machine that only wanted the parallel word
+    set. Pass a duty explicitly when you actually want the beam modulated.
     """
     period = int(round(48000.0 / freq_khz))
-    duty_us = 0.5 * (1000.0 / freq_khz)          # fixed 50% so width is sane
+    duty_us = (duty_pct / 100.0) * (1000.0 / freq_khz)
     width = int(round(duty_us * 48.0)) & 0xFFFF
     fbyte = int(round(freq_khz * 0.5)) & 0xFF
     p1 = ((period >> 8) & 0xFF) | (fbyte << 8)

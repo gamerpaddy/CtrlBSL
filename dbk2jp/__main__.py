@@ -6,6 +6,7 @@
     inputs [secs]      live input/SGIN view, edge timings on exit
     out <port> <0|1>   set an output port
     jump <x> <y>       move the galvos (hex or decimal)
+    off                silence every laser output: marking PWM, tickle, gate
 
     field [path] [key=value ...]
                        show the scan field, creating a default markcfg0 if
@@ -75,6 +76,12 @@ def main(argv):
             ok = unlock(b, SETS[name])
             print("UNLOCKED / LED green" if ok else "still locked")
         return 0 if ok else 1
+
+    if what == "off":
+        with Job(unlock_now=False) as j:
+            j.laser_off()
+        print("laser outputs off")
+        return 0
 
     if what == "field":
         path, sets = "markcfg0", {}
