@@ -184,11 +184,15 @@ j.settings()                                 # what will go on the wire
 The code is the high byte of `0x0211` Param0. `LASERS` holds the table;
 `Laser` is the record type if you want to define your own.
 
-`configure(freq_khz, power_pct, power_byte, mopa_pulse, tickle)` stores the
+`configure(freq_khz, power_pct, power_byte, mopa_pulse, tickle, tick_khz, tick_us)` stores the
 settings and emits nothing: they go into each job's EP 0x02 header. Pass
 `power_pct` or `power_byte`, whichever suits the laser, and the other is
 derived. It raises on a frequency outside the type's range, a tickle on a laser
 without one, and a pulse width on a laser that takes none.
+
+The tickle has its own frequency and width, set with `tick_khz` / `tick_us` or
+`tick()`. Range is 0.74 to 100 kHz and the width must be shorter than the
+period; both are checked.
 
 ### MOPA pulse width
 
@@ -203,7 +207,7 @@ now. Read out of the vendor pen-parameter path, which emits it whenever
 |---|---|
 | `configure(...)` / `select(...)` / `settings()` | laser setup, above |
 | `power_byte(value, freq_khz)` | write the fiber P0-P7 word immediately, outside a job |
-| `tick(freq_khz, width_us)` / `tick_off()` | CO2 tickle. **Free-running** - survives job end *and host exit*; always `tick_off()` |
+| `tick(freq_khz, width_us, enable)` / `tick_off()` | CO2 tickle shape. Either argument may be omitted to keep the current value. Returns `(actual_hz, width_ticks, duty_pct)`. **Free-running** - survives job end *and host exit* |
 | `begin(start, speed)` / `lines(points, speed)` | lit vector streaming |
 | `jump(x, y, speed, delay)` | unlit move. `0x8000` is centre, span `0x0000`-`0xFFFF` |
 | `pwm_burst(seconds, ...)` | sustained PWM for scope work, paced off `free_cache()` |

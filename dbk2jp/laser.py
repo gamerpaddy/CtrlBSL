@@ -31,14 +31,15 @@ class Laser:
     freq_khz    sensible default marking frequency
     freq_range  (min, max) kHz the board was seen to produce
     tickle      laser wants a tickle/pre-ionisation train when idle, and gets
-                one by default. tick_khz/tick_us are that default shape.
+                one by default. tick_khz/tick_us are that default shape and
+                tick_range the frequencies the generator can produce.
     mopa_pulse  laser takes a pulse-width setting (0x0206)
     verified    the type code was confirmed on hardware
     """
 
     def __init__(self, name, code, power, freq_khz, freq_range,
                  tickle=False, mopa_pulse=False, verified=False, note="",
-                 tick_khz=5.0, tick_us=1.0):
+                 tick_khz=5.0, tick_us=1.0, tick_range=(0.74, 100.0)):
         self.name = name
         self.code = code
         self.power = power
@@ -47,6 +48,7 @@ class Laser:
         self.tickle = tickle
         self.tick_khz = tick_khz
         self.tick_us = tick_us
+        self.tick_range = tick_range
         self.mopa_pulse = mopa_pulse
         self.verified = verified
         self.note = note

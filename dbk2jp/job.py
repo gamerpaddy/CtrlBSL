@@ -59,7 +59,7 @@ class Job:
         return self.laser
 
     def configure(self, freq_khz=None, power_pct=None, power_byte=None,
-                  mopa_pulse=None, tickle=None):
+                  mopa_pulse=None, tickle=None, tick_khz=None, tick_us=None):
         """Set the laser parameters for this job.
 
         power_pct is PWM duty; power_byte is the 8-bit parallel word on P0..P7.
@@ -84,6 +84,8 @@ class Job:
             if not self.laser.mopa_pulse:
                 raise ValueError("%s has no pulse-width setting" % self.laser.name)
             self._mopa_pulse = mopa_pulse
+        if tick_khz is not None or tick_us is not None:
+            self.tick(freq_khz=tick_khz, width_us=tick_us, enable=None)
         if tickle is not None:
             if tickle and not self.laser.tickle:
                 raise ValueError("%s has no tickle" % self.laser.name)
@@ -101,6 +103,8 @@ class Job:
             "power_byte": self._power_byte,
             "mopa_pulse": self._mopa_pulse,
             "tickle": self._tickle,
+            "tick_khz": self._tick_khz if self.laser.tickle else None,
+            "tick_us": self._tick_us if self.laser.tickle else None,
             "verified": self.laser.verified,
         }
 
@@ -210,15 +214,42 @@ class Job:
         self.b.write_data(S.cmd(0x0206, 0xA501, value & 0xFFFF, 0, 0, 0))
         return value
 
-    def tick(self, freq_khz=5.0, width_us=2.0, enable=True):
-        """CO2 pre-ionisation tickle -- its own period/width, independent of the
-        marking PWM set by laser(). 0x0217: Param0 = flags<<8 (bit0 ENPWMTICK,
-        bit1 ENCO2FPK), Param1 = period in 48 MHz ticks, Param2 = width in ticks."""
-        self._tickle = enable
-        self._tick_khz = freq_khz
-        self._tick_us = width_us
-        period = int(round(48000.0 / freq_khz))
-        return 48e6 / (period + 1), int(round(width_us * 48))
+    def tick(self, freq_khz=None, width_us=None, enable=True):
+        """Set the tickle shape. Frequency and width are independent settings.
+
+        The tickle is its own generator, unrelated to the marking PWM: 0x0217
+        Param0 = flags<<8 (bit0 ENPWMTICK, bit1 ENCO2FPK), Param1 = period in
+        48 MHz ticks, Param2 = width in ticks.
+
+        Either argument may be omitted to keep the current value. `enable=None`
+        leaves the on/off state alone, which is how configure() calls it.
+
+        Returns (actual_freq_hz, width_ticks, duty_pct). The period is an N+1
+        counter, so the frequency lands on the nearest achievable value.
+        """
+        if not self.laser.tickle:
+            raise ValueError("%s has no tickle" % self.laser.name)
+
+        f = self._tick_khz if freq_khz is None else freq_khz
+        w = self._tick_us if width_us is None else width_us
+
+        lo, hi = self.laser.tick_range
+        if not lo <= f <= hi:
+            raise ValueError("tickle frequency %g kHz outside %g..%g kHz"
+                             % (f, lo, hi))
+        period_us = 1000.0 / f
+        if not 0 < w < period_us:
+            raise ValueError(
+                "tickle width %g us must be >0 and shorter than the %.1f us "
+                "period at %g kHz" % (w, period_us, f))
+
+        self._tick_khz, self._tick_us = f, w
+        if enable is not None:
+            self._tickle = enable
+
+        period = int(round(S.FPGA_CLK_KHZ / f))
+        ticks = int(round(w * 48))
+        return 48e6 / (period + 1), ticks, 100.0 * w / period_us
 
     def _header(self):
         if self.laser.power == "byte":

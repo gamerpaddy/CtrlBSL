@@ -28,7 +28,7 @@ from dbk2jp import Job, CO2
 
 with Job(CO2) as j:
     j.configure(freq_khz=20, power_pct=40)      # 20 kHz, 40% duty
-                                                # tickle already on at 5 kHz / 1 us
+                                                # tickle already on, 5 kHz / 1 us
     j.begin(start=(0x4000, 0x4000), speed=300)
     j.lines([(0xC000, 0x4000),
              (0xC000, 0xC000),
@@ -38,59 +38,76 @@ with Job(CO2) as j:
 
 ### Tickle
 
-A separate free-running generator with its own period and width, independent of
-the marking PWM. It is **on by default for CO2**; `tick()` changes the shape and
-`configure(tickle=False)` switches it off for a job.
+A separate free-running generator with **its own frequency and pulse width**,
+both independent of the marking PWM. It is on by default for CO2 at 5 kHz / 1 us.
+
+Set both at once through `configure()`:
 
 ```python
 with Job(CO2) as j:
-    j.tick(freq_khz=10.0, width_us=2.0)         # override the 5 kHz / 1 us default
-    j.configure(freq_khz=20, power_pct=40)
+    j.configure(freq_khz=20, power_pct=40,      # marking PWM
+                tick_khz=10.0, tick_us=2.0)     # tickle
     j.begin(start=(0x4000, 0x8000), speed=300)
     j.lines([(0xC000, 0x8000)], speed=300)
 ```
 
-Typical settings. Width is what keeps the tube primed without lasing, so it
-stays short; the frequency sets how often.
+Or through `tick()`, which returns what the board will actually produce:
 
 ```python
-j.tick(freq_khz=5.0,  width_us=1.0)     # common starting point
-j.tick(freq_khz=20.0, width_us=1.0)     # faster, shorter dead time
-j.tick(freq_khz=1.0,  width_us=5.0)     # slow and wide
+freq_hz, width_ticks, duty_pct = j.tick(freq_khz=10.0, width_us=2.0)
+print(freq_hz, width_ticks, duty_pct)       # 9997.9 Hz, 96 ticks, 2.0 %
 ```
 
-`tick()` returns the frequency the board will actually produce and the width in
-48 MHz ticks. The period is an N+1 counter, so a request lands on the nearest
-achievable value:
+The period is an N+1 counter at 48 MHz, so the frequency lands on the nearest
+achievable value. Width is in 48 MHz ticks, 1 us being 48 of them.
+
+Either setting can be changed on its own:
 
 ```python
-freq, width_ticks = j.tick(freq_khz=5.0, width_us=1.0)
-print(freq, width_ticks)                # 4999.5 Hz, 48 ticks
+j.tick(width_us=5.0)        # wider pulses, same frequency
+j.tick(freq_khz=2.0)        # slower, same width
 ```
 
-Warm the tube before marking, then mark with the tickle still on:
+Typical shapes. Width keeps the tube primed without lasing, so it stays short;
+frequency sets how often.
+
+```python
+j.tick(freq_khz=5.0,  width_us=1.0)     # common starting point, 0.5 % duty
+j.tick(freq_khz=20.0, width_us=1.0)     # faster, shorter dead time, 2 % duty
+j.tick(freq_khz=1.0,  width_us=5.0)     # slow and wide, 0.5 % duty
+```
+
+Both are range checked. The generator covers **0.74 to 100 kHz**, and the width
+must be shorter than the period, so an impossible pair is rejected rather than
+silently wrapping:
+
+```python
+j.tick(freq_khz=5.0, width_us=300)
+# ValueError: tickle width 300 us must be >0 and shorter than the
+#             200.0 us period at 5 kHz
+```
+
+Warm the tube before marking:
 
 ```python
 import time
 
 with Job(CO2) as j:
-    j.tick(freq_khz=5.0, width_us=1.0)
-    j.configure(freq_khz=20, power_pct=40, tickle=True)
-
+    j.configure(freq_khz=20, power_pct=40, tick_khz=5.0, tick_us=1.0)
     j.begin(start=(0x4000, 0x8000), speed=300)  # tickle starts here
     time.sleep(2.0)                             # let the tube settle
     j.lines([(0xC000, 0x8000)], speed=300)
 ```
 
-Turn it off explicitly. It is **free-running**: it keeps pulsing after the job
-ends and after your script exits.
+Turn it off. It is **free-running**: it keeps pulsing after the job ends and
+after your script exits.
 
 ```python
 with Job(CO2) as j:
     j.tick_off()
 ```
 
-`close()` does this for you if that job enabled the tickle, but a killed process
+`close()` does this for you if that job had the tickle on, but a killed process
 does not. If a pin is still ticking from an earlier run, the snippet above
 clears it.
 
