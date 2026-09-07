@@ -1,4 +1,4 @@
-# `dbk2jp` — API reference
+# `dbk2jp` - API reference
 
 Drive a BSL/SeaCAD **DBK2JP** galvo laser controller directly over USB, without
 BslApp/SeaCAD or LightBurn.
@@ -24,7 +24,7 @@ real hardware with a scope.
 
 The public API is identical on both. Only the transport differs.
 
-Nothing is installed — put the `dbk2jp/` folder next to your script.
+Nothing is installed - put the `dbk2jp/` folder next to your script.
 
 ```python
 from dbk2jp import Job
@@ -43,7 +43,7 @@ with Job() as j:                    # opens, unlocks, leaves the board armed
 inline in the EP 0x02 batch, ahead of the vectors.**
 
 The board ACKs parameter commands sent on EP 0x06 and then silently ignores
-them — no error, no status change, just no effect. Two separate debugging dead
+them - no error, no status change, just no effect. Two separate debugging dead
 ends came from this. `Job` already routes each command correctly; it only
 matters if you build commands yourself.
 
@@ -106,12 +106,12 @@ board, not from the hardware. On the development machine one instance of
 3. keeps only paths carrying VID `04B4` / PID `1004`.
 
 VID and PID are fixed for this board; the GUID is not. Earlier revisions
-hardcoded the GUID and took the first path enumerated — that worked on exactly
+hardcoded the GUID and took the first path enumerated - that worked on exactly
 one machine.
 
 ---
 
-## `Board` — transport
+## `Board` - transport
 
 | Method | Purpose |
 |---|---|
@@ -145,7 +145,7 @@ with Board() as b:
 
 Three frames are enough: the host-computed SHA-256 digest on `0x0C5D`, the MAC
 command on `0x0C5C`, and the transmit token. The inter-frame gaps are
-load-bearing — the ATSHA204 needs 40–120 ms per command, and replaying
+load-bearing - the ATSHA204 needs 40-120 ms per command, and replaying
 back-to-back reads stale registers and fails silently.
 
 Larger sets are kept for debugging: `SETS["bare"|"rb"|"wake"|"core"|"auth"|"min"|"full"]`.
@@ -155,26 +155,70 @@ ready/arm flag; the reset tail sets it with the LED still red.
 
 ---
 
-## `Job` — laser and marking
+## `Job` - laser and marking
 
 ```python
-Job(laser=LASER_CO2, board=None, index=0, unlock_now=True)
+Job(laser=CO2, board=None, index=0, unlock_now=True)
 ```
 
-Laser types: `LASER_CO2` `LASER_FIBER` `LASER_UV` `LASER_GREEN` `LASER_MOPA`.
+### Laser selection
+
+```python
+from dbk2jp import Job, CO2, FIBER, UV, GREEN, MOPA, YAG, LASERS
+
+j.select(FIBER)                              # name, Laser object, or raw code
+j.configure(freq_khz=30, power_byte=0xC0)
+j.settings()                                 # what will go on the wire
+```
+
+| Type | Code | Power | Tickle | Pulse width | Verified |
+|---|---|---|---|---|---|
+| `CO2` | `0x22` | PWM duty | yes | no | yes |
+| `FIBER` | `0x11` | byte on P0-P7 | no | no | yes |
+| `UV` | `0x33` | PWM duty | no | no | no |
+| `GREEN` | `0x44` | PWM duty | no | no | no |
+| `MOPA` | `0x55` | byte on P0-P7 | no | yes | no |
+| `YAG` | `0x00` | PWM duty | no | no | no, code is a guess |
+
+The code is the high byte of `0x0211` Param0. `LASERS` holds the table;
+`Laser` is the record type if you want to define your own.
+
+`configure(freq_khz, power_pct, power_byte, mopa_pulse, tickle)` stores the
+settings and emits nothing: they go into each job's EP 0x02 header. Pass
+`power_pct` or `power_byte`, whichever suits the laser, and the other is
+derived. It raises on a frequency outside the type's range, a tickle on a laser
+without one, and a pulse width on a laser that takes none.
+
+### MOPA pulse width
+
+`0x0206`, `Param0 = 0xA501`, `Param1 = pulse`, on EP 0x02. Set it through
+`configure(mopa_pulse=...)` for the next job, or `mopa_pulse(value)` to send it
+now. Read out of the vendor pen-parameter path, which emits it whenever
+`nMopaPulse` changes. **Untested** - no MOPA laser here.
+
+### Marking
 
 | Method | Notes |
 |---|---|
-| `laser(freq_khz, power_pct, tickle)` | marking PWM. `f = 48e6/(period+1)`, duty = power %. Verified 1–40 kHz |
-| `power_byte(value, freq_khz)` | fiber P0–P7 parallel word. Static, latched, PLATCH strobes on change |
-| `tick(freq_khz, width_us)` / `tick_off()` | CO2 tickle. **Free-running** — survives job end *and host exit*; always `tick_off()` |
+| `configure(...)` / `select(...)` / `settings()` | laser setup, above |
+| `power_byte(value, freq_khz)` | write the fiber P0-P7 word immediately, outside a job |
+| `tick(freq_khz, width_us)` / `tick_off()` | CO2 tickle. **Free-running** - survives job end *and host exit*; always `tick_off()` |
 | `begin(start, speed)` / `lines(points, speed)` | lit vector streaming |
-| `jump(x, y, speed, delay)` | unlit move. `0x8000` is centre, span `0x0000`–`0xFFFF` |
+| `jump(x, y, speed, delay)` | unlit move. `0x8000` is centre, span `0x0000`-`0xFFFF` |
 | `pwm_burst(seconds, ...)` | sustained PWM for scope work, paced off `free_cache()` |
 | `red_light(on)` | pilot pointer, CON3 pin 22 |
-| `mo(on)` / `laser_port_switch(...)` | MO gate / port switch |
-| `free_cache()` | free queue slots, **0–256** |
+| `mo(on)` / `laser_port_switch(...)` | MO command pair / port switch |
+| `running()` | engine started (`0x0101` byte 2 bit 3). **Not** "still marking" |
+| `free_cache()` | free queue slots, **0 to 256** |
 | `stop()` / `close(quiet=None)` | reset; `close` switches the tickle off if this job started it |
+
+There is **no job-complete indicator**. `running()` is set by `0x0104` and stays
+set until a reset, and `free_cache()` reads idle even while vectors are
+executing. Time your own waits; `axis_move()` returns its expected duration for
+exactly this reason.
+
+`mo()` has no observable effect on pin 18: the marking engine asserts MO by
+itself and the pin tracks engine activity, not lasing.
 
 `pwm_burst` is closed-loop against the board's own counter. Open-loop pacing
 drains the queue between chunks and the output visibly drops to tickle-only
@@ -184,7 +228,7 @@ about once a second.
 
 ## Inputs
 
-All input state rides in the `0x0101` status reply — there is no separate read
+All input state rides in the `0x0101` status reply - there is no separate read
 command.
 
 ```python
@@ -197,16 +241,16 @@ j.free_cache()      # low byte of the same word
 
 | Bit | Signal |
 |---|---|
-| 0–7 | free cache count (256-slot queue, 189 free at idle) |
-| 8 | `IN0` — also the **X axis origin/home switch** on some setups |
+| 0 to 7 | free cache count (256-slot queue, 189 free at idle) |
+| 8 | `IN0` - also the **X axis origin/home switch** on some setups |
 | 9 | `IN1` |
 | 10 | `IN2` |
 | 11 | `REMARK` (mark-repeat trigger; there is no IN3 on the connector) |
-| 12–15 | always 0 |
+| 12-15 | always 0 |
 
-**Idle reads 1, driven reads 0** — opto inputs with pull-ups.
+**Idle reads 1, driven reads 0** - opto inputs with pull-ups.
 
-`free_cache()` masks bits 8–15 off. Reading the raw 16-bit word makes the count
+`free_cache()` masks bits 8-15 off. Reading the raw 16-bit word makes the count
 jump by 256 on every input edge; earlier revisions did exactly that and reported
 4029 free slots instead of 189.
 
@@ -220,14 +264,14 @@ j.abort()                   # gate off -> clear cache -> reset
 j.guard(seconds)            # poll SGIN, abort on assertion; False if it fired
 ```
 
-SGIN carries laser fault lines — overheat, back-reflection, ready — which vary
+SGIN carries laser fault lines - overheat, back-reflection, ready - which vary
 by laser model. Any assertion must stop marking and laser output.
 
 **SGIN0, SGIN1 and SGIN2 are OR'd into one bit** (byte 2 bit 1). The board tells
 you that *some* SGIN asserted, never which. Per-fault handling requires reading
 the lines outside this board. SGIN3 does not appear in the status reply at all.
 
-**`guard()` is not an interlock.** It is a USB poll: ~4–8 ms per round trip, so
+**`guard()` is not an interlock.** It is a USB poll: ~4 to 8 ms per round trip, so
 worst-case reaction is tens of milliseconds, and it dies with the host process.
 E-stop belongs in hardware.
 
@@ -242,7 +286,7 @@ j.out_state()                   # 0x0112
 ```
 
 `0x0111` takes the **port index in the high byte of Param0** and the level in
-Param1 — it is not a bitmask. Writing `0x0001` to Param0 addresses port 0 with
+Param1 - it is not a bitmask. Writing `0x0001` to Param0 addresses port 0 with
 level 0 and does nothing, which is what the first attempts did.
 
 **OUT2 and OUT3 are the stepper `DIR` and `PULSE` pins**, owned by
@@ -273,13 +317,13 @@ Accel and decel are symmetric. They only look asymmetric over a wide rate span
 
 Documented so nobody re-runs these experiments.
 
-### FPS — first pulse suppression (CON3 pin 6) — not reachable
+### FPS - first pulse suppression (CON3 pin 6) - not reachable
 
 Never observed to move. Exhausted:
 
 - 48 triggered mark-starts with the real config values (`ENFPK=1`, `FPK=40`,
   `OPC_FPKTIME=20`), tick flags `0x0200` / `0x0300`, laser types `0x33`, `0x44`.
-- Output-port sweep: every `0x0111` index 0–15 toggled together. Not a GPIO.
+- Output-port sweep: every `0x0111` index 0-15 toggled together. Not a GPIO.
 - `0x0218`, the Q-switch FPK branch of `SendPenPara`, which the first round never
   sent: `Param0 = (qs<<8) | (FPKTime>>8)`, `Param1 = (FPKTime&0xFF)<<8`, `qs` 3
   or 7. Across laser types `0x00`/`0x22`/`0x33`/`0x66`, FPKTime 20 and 40.
@@ -287,7 +331,7 @@ Never observed to move. Exhausted:
 
 Most likely a board-variant pin this firmware never drives.
 
-### DA1 — analog CO2 power (CON3 pin 15) — not reachable
+### DA1 - analog CO2 power (CON3 pin 15) - not reachable
 
 `j.dac()` produces no voltage. `ENPOWERANALOGOUT=0` in `markcfg0`, and
 `SendPenPara` only emits the analog command (`0x0207`) for `iLsrType` 0 or 6.
@@ -304,7 +348,7 @@ protocol gap.
 
 ### Closed as not protocol issues
 
-EMSTOP (hardware interlock), tickle-during-mark (hardware mux — BslApp behaves
+EMSTOP (hardware interlock), tickle-during-mark (hardware mux - BslApp behaves
 identically).
 
 ---
@@ -315,7 +359,7 @@ identically).
   *and after the host process exits*. `close()` handles it; a killed process
   does not.
 - **The unlock latch is sticky.** Once green it survives everything short of a
-  power cycle — a deliberately corrupted digest is ignored silently. Testing the
+  power cycle - a deliberately corrupted digest is ignored silently. Testing the
   unlock path costs one power cycle per experiment.
 - **EP 0x02 overrun clears the ready bit.** `ucPara0` drops to `0x0e` and the
   board needs re-arming. Pace against `free_cache()`.

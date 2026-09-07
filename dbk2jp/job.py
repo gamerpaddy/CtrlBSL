@@ -18,8 +18,10 @@ import time
 from . import protocol as S
 from .usb import Board
 from .unlock import unlock, encrypt_state
+from . import laser as _laser
+from .laser import CO2, FIBER, UV, GREEN, MOPA, YAG, LASERS, Laser
 
-# CO2=0x22, fiber=0x11, UV=0x33, green=0x44, MOPA=0x55 (high byte of 0x0211 Param0)
+# Raw type codes, kept for callers that had them hardcoded. Prefer the names.
 LASER_CO2, LASER_FIBER, LASER_UV, LASER_GREEN, LASER_MOPA = 0x22, 0x11, 0x33, 0x44, 0x55
 
 SEG_TIME = 0.00083          # measured cost of one lit segment, seconds
@@ -28,14 +30,77 @@ CENTRE = 0x8000
 
 
 class Job:
-    def __init__(self, laser=LASER_CO2, board=None, index=0, unlock_now=True):
+    """A session against one board.
+
+        with Job(CO2) as j:
+            j.configure(freq_khz=20, power_pct=50)
+    """
+
+    def __init__(self, laser=CO2, board=None, index=0, unlock_now=True):
         self.b = board if board is not None else Board(index=index)
-        self.laser_type = laser
-        self._freq = 20
-        self._power = 50
-        self._tickle = False
+        self.select(laser)
         if unlock_now:
             self.ensure_unlocked()
+
+    # ---- laser selection -------------------------------------------------
+
+    def select(self, kind):
+        """Pick the laser type: a name (CO2, FIBER, UV, GREEN, MOPA, YAG), a
+        Laser, or a raw type code. Loads that type's defaults."""
+        self.laser = _laser.get(kind)
+        self.laser_type = self.laser.code
+        self._freq = self.laser.freq_khz
+        self._power = 50                 # percent
+        self._power_byte = 0x80
+        self._mopa_pulse = None
+        self._tickle = False
+        return self.laser
+
+    def configure(self, freq_khz=None, power_pct=None, power_byte=None,
+                  mopa_pulse=None, tickle=None):
+        """Set the laser parameters for this job.
+
+        power_pct is PWM duty; power_byte is the 8-bit parallel word on P0..P7.
+        Pass whichever suits the laser -- the other is derived, so the header is
+        always consistent. Nothing reaches the board here: these are emitted
+        into each job's EP 0x02 header, because the board ACKs parameter
+        commands sent on EP 0x06 and then ignores them.
+        """
+        if freq_khz is not None:
+            lo, hi = self.laser.freq_range
+            if not lo <= freq_khz <= hi:
+                raise ValueError("%s wants %g..%g kHz, got %g"
+                                 % (self.laser.name, lo, hi, freq_khz))
+            self._freq = freq_khz
+        if power_pct is not None:
+            self._power = power_pct
+            self._power_byte = (int(power_pct) * 0xFF) // 100
+        if power_byte is not None:
+            self._power_byte = power_byte & 0xFF
+            self._power = round(self._power_byte * 100.0 / 0xFF)
+        if mopa_pulse is not None:
+            if not self.laser.mopa_pulse:
+                raise ValueError("%s has no pulse-width setting" % self.laser.name)
+            self._mopa_pulse = mopa_pulse
+        if tickle is not None:
+            if tickle and not self.laser.tickle:
+                raise ValueError("%s has no tickle" % self.laser.name)
+            self._tickle = tickle
+        return self.settings()
+
+    def settings(self):
+        """What would go on the wire, as a dict."""
+        period = int(round(S.FPGA_CLK_KHZ / self._freq))
+        return {
+            "laser": self.laser.name,
+            "code": self.laser.code,
+            "freq_khz": 48e3 / (period + 1),      # N+1 counter, actual output
+            "power_pct": self._power,
+            "power_byte": self._power_byte,
+            "mopa_pulse": self._mopa_pulse,
+            "tickle": self._tickle,
+            "verified": self.laser.verified,
+        }
 
     # ---- plumbing -------------------------------------------------------
     def _cmd(self, c, t=1200, retries=3):
@@ -133,11 +198,15 @@ class Job:
         return self.unlocked()
 
     # ---- configuration --------------------------------------------------
-    def laser(self, freq_khz=20, power_pct=50, tickle=False):
-        """Store laser settings. They are emitted into each job's EP 0x02 header."""
-        self._freq, self._power, self._tickle = freq_khz, power_pct, tickle
-        period = int(round(48000.0 / freq_khz))
-        return 48e6 / (period + 1)          # actual output frequency (N+1 counter)
+    def mopa_pulse(self, value):
+        """MOPA pulse width, 0x0206 Param0=0xA501 Param1=value, on EP 0x02.
+
+        Read off CCmdExecutor's pen-parameter path, which sends it whenever
+        nMopaPulse changes. UNTESTED -- no MOPA laser here to measure.
+        """
+        self._mopa_pulse = value
+        self.b.write_data(S.cmd(0x0206, 0xA501, value & 0xFFFF, 0, 0, 0))
+        return value
 
     def tick(self, freq_khz=5.0, width_us=2.0, enable=True):
         """CO2 pre-ionisation tickle -- its own period/width, independent of the
@@ -150,13 +219,18 @@ class Job:
         return 48e6 / (period + 1), int(round(width_us * 48))
 
     def _header(self):
-        pwr, period, width = S.set_power_0210(self._freq, self._power)
+        if self.laser.power == "byte":
+            pwr = S.set_power_raw(self._freq, self._power_byte)
+        else:
+            pwr = S.set_power_0210(self._freq, self._power)[0]
         tk = getattr(self, "_tick_khz", self._freq)
         tus = getattr(self, "_tick_us", 1.0)
         tperiod = int(round(48000.0 / tk))
         twidth = int(round(tus * 48))
         h = S.cmd(0x0211, (self.laser_type << 8), 0, 0, 0, 0)
         h += pwr
+        if self._mopa_pulse is not None:
+            h += S.cmd(0x0206, 0xA501, self._mopa_pulse & 0xFFFF, 0, 0, 0)
         h += S.cmd(0x0217, 0x0100 if self._tickle else 0x0000,
                    tperiod & 0xFFFF, twidth & 0xFFFF, 0, 0)
         h += S.cmd(0x0208, 0, 0, 0, 0, 0)
@@ -197,6 +271,19 @@ class Job:
         """
         st = self.status()
         return (((st[5] << 8) | st[6]) & ~self.IN_MASK & 0xFFFF) if st else 0
+
+    RUNNING_BIT = 0x08       # byte 2: set by 0x0104 Run, cleared by 0x0105
+
+    def running(self):
+        """True once the marking engine has been started (0x0104).
+
+        This is NOT "still marking" -- it stays set until a reset. No
+        queue-drained or job-complete indicator has been found: free_cache()
+        reads idle even while vectors are executing, so it cannot be polled for
+        completion either. Time your own waits.
+        """
+        st = self.status()
+        return None if st is None else bool(st[2] & self.RUNNING_BIT)
 
     def pwm_burst(self, seconds=10, speed=200, span=(0x4000, 0xC000), margin=48):
         """Sustained laser PWM for scope work.
