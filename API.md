@@ -4,7 +4,8 @@ Drive a BSL/SeaCAD **DBK2JP** galvo laser controller directly over USB, without
 BslApp/SeaCAD or LightBurn.
 
 Every number here was recovered by decompiling the vendor DLLs and verified on
-real hardware with a scope.
+real hardware with a scope. For runnable code per laser type, see
+[EXAMPLES.md](EXAMPLES.md).
 
 ---
 

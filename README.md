@@ -20,7 +20,7 @@ The Linux path is written against the protocol but has not been run on real
 hardware yet. Same `Board` and `Job` on every platform; only the transport
 module differs.
 
-Full reference: **[API.md](API.md)**
+Examples: **[EXAMPLES.md](EXAMPLES.md)**  |  Full reference: **[API.md](API.md)**
 
 ---
 
@@ -99,90 +99,15 @@ here to measure.
 
 ## Examples
 
-**Read inputs and the laser status line**
+Per-laser-type examples, plus machine integration: **[EXAMPLES.md](EXAMPLES.md)**
 
-```python
-from dbk2jp import Job
-
-with Job(unlock_now=False) as j:
-    print(j.input_pin(0), j.input_pin(1), j.input_pin(2))   # True = idle
-    print(j.remark(), j.sgin())                             # sgin False = fault
-    print(j.free_cache(), "of 256 queue slots")
-```
-
-**Engrave a row of parts on a rotary axis**
-
-`OUT2` and `OUT3` are the stepper `DIR` and `PULSE` pins, driven by
-`axis_move()`. Accel and decel are symmetric.
-
-```python
-import time
-from dbk2jp import Job, CO2
-
-with Job(CO2) as j:
-    j.configure(freq_khz=20, power_pct=40)
-
-    for part in range(12):
-        j.begin(start=(0x6000, 0x8000), speed=300)
-        j.lines([(0xA000, 0x8000)], speed=300)     # one line per part
-
-        secs = j.axis_move(pulses=800, pps=2000, acctime=100)
-        time.sleep(secs + 0.1)                     # axis_move does not block
-```
-
-There is no job-complete flag on this board, so the mark and the rotation are
-separated by time, not by a status read. `axis_move()` returns the duration it
-expects to take; give it that plus a margin before starting the next mark.
-
-**Home an axis against the origin switch**
-
-`IN0` is the X origin switch on machines wired for one. Inputs read 1 when idle
-and 0 when driven, so the switch closing shows up as a falling edge.
-
-```python
-import time
-from dbk2jp import Job
-
-with Job() as j:
-    while j.input_pin(0):                  # still off the switch
-        j.axis_move(pulses=50, pps=800, direction=1, acctime=20)
-        time.sleep(0.1)
-    j.axis_move(pulses=200, pps=400)       # back off the switch
-```
-
-**Start a mark from a trigger input**
-
-`REMARK` is the mark-repeat trigger. Wire a foot pedal or a part-present sensor
-to it and wait on the edge.
-
-```python
-import time
-from dbk2jp import Job, CO2
-
-with Job(CO2) as j:
-    j.configure(freq_khz=20, power_pct=40)
-    while True:
-        while j.remark():                  # idle high, wait for it to be pulled low
-            time.sleep(0.005)
-        j.begin(start=(0x4000, 0x4000), speed=300)
-        j.lines([(0xC000, 0x4000), (0xC000, 0xC000),
-                 (0x4000, 0xC000), (0x4000, 0x4000)], speed=300)
-        while not j.remark():              # wait for release
-            time.sleep(0.005)
-```
-
-**Stop on a laser fault**
-
-```python
-from dbk2jp import Job, CO2
-
-with Job(CO2) as j:
-    j.configure(freq_khz=20, power_pct=40)
-    j.begin(start=(0x4000, 0x4000), speed=300)
-    j.lines([(0xC000, 0x4000), (0xC000, 0xC000)], speed=300)
-    if not j.guard(2.0):                  # polls SGIN, aborts if it asserts
-        print("laser fault, aborted")
-```
+- **CO2** PWM duty, tickle options, warm-up
+- **Fiber** parallel power word on P0..P7, exact byte values, PLATCH
+- **MOPA** pulse width and a width sweep
+- **UV / green** PWM duty, no tickle
+- **YAG** and where first-pulse suppression stops
+- **Machine integration** rotary axis, homing on the origin switch, trigger
+  input, fault handling, pilot pointer, output ports
 
 ---
 
