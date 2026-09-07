@@ -261,8 +261,14 @@ exit hook catches a script that exits without either. Order matters inside
 `laser_off()`: arming before zeroing restarts the engine with the old values
 loaded and emits a burst.
 
-`mo()` has no observable effect on pin 18: the marking engine asserts MO by
-itself and the pin tracks engine activity, not lasing.
+`mo()` has no observable effect, and nothing else found so far controls MO or
+PA either. They stay low through marking: a 6 s mark, 6 s idle, 6 s mark run
+asserted neither pin, giving only one brief MO pulse. `0x0281` MO-on does
+nothing, nor does a non-zero `0x0208`, nor `0x0211` Param1 swept by nibble and
+by single bit. Both pins are push-pull 5 V on this board, not open collector,
+so those are real levels rather than a floating node. PRR and P0 read correctly
+in the same runs, so the job itself executes. The remaining untested lead is
+laser-type gating, since GATE is known to work only on types `0x33` and `0x44`.
 
 `pwm_burst` is closed-loop against the board's own counter. Open-loop pacing
 drains the queue between chunks and the output visibly drops to tickle-only
