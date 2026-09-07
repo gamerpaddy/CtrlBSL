@@ -140,7 +140,8 @@ is needed to set it, and it persists until you change it.
 from dbk2jp import Job, FIBER
 
 with Job(FIBER) as j:
-    j.configure(freq_khz=30, power_byte=0xC0)   # 192 of 255
+    j.configure(freq_khz=30, power_byte=0xC0,   # 192 of 255
+                mo=True)                        # MO and PA enable
     j.begin(start=(0x4000, 0x4000), speed=400)
     j.lines([(0xC000, 0x4000),
              (0xC000, 0xC000),
@@ -172,6 +173,23 @@ with Job(FIBER) as j:
 ```
 
 Each write strobes `PLATCH`, so the laser clocks in the new value immediately.
+
+### MO and PA
+
+Most fiber and MOPA sources need the master oscillator and power amplifier
+enables asserted before they emit. They are off by default here, since they are
+amplifier enables on the laser side:
+
+```python
+with Job(FIBER) as j:
+    j.configure(freq_khz=30, power_byte=0xC0, mo=True)
+    j.begin(start=(0x4000, 0x4000), speed=400)
+    j.lines([(0xC000, 0x4000), (0x4000, 0x4000)], speed=400)
+```
+
+`j.mo(True)` does the same thing outside `configure()`. Either way it takes
+effect with the next job header, so set it before `begin()`. Both pins come up
+as the job starts and drop when it ends, and `laser_off()` clears the flag.
 
 ---
 

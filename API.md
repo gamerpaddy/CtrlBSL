@@ -243,7 +243,8 @@ See EXAMPLES.md.
 | `jump(x, y, speed, delay)` | unlit move. `0x8000` is centre, span `0x0000`-`0xFFFF` |
 | `pwm_burst(seconds, ...)` | sustained PWM for scope work, paced off `free_cache()` |
 | `red_light(on)` | pilot pointer, CON3 pin 22 |
-| `mo(on)` / `laser_port_switch(...)` | MO command pair / port switch |
+| `mo(on)` | enable MO and PA, `0x0211` Param1 bit 8 |
+| `laser_port_switch(...)` | port switch, purpose unknown |
 | `running()` | engine started (`0x0101` byte 2 bit 3). **Not** "still marking" |
 | `free_cache()` | free queue slots, **0 to 256** |
 | `laser_off()` | silence every laser output: marking PWM, tickle, gate |
@@ -261,14 +262,13 @@ exit hook catches a script that exits without either. Order matters inside
 `laser_off()`: arming before zeroing restarts the engine with the old values
 loaded and emits a burst.
 
-`mo()` has no observable effect, and nothing else found so far controls MO or
-PA either. They stay low through marking: a 6 s mark, 6 s idle, 6 s mark run
-asserted neither pin, giving only one brief MO pulse. `0x0281` MO-on does
-nothing, nor does a non-zero `0x0208`, nor `0x0211` Param1 swept by nibble and
-by single bit. Both pins are push-pull 5 V on this board, not open collector,
-so those are real levels rather than a floating node. PRR and P0 read correctly
-in the same runs, so the job itself executes. The remaining untested lead is
-laser-type gating, since GATE is known to work only on types `0x33` and `0x44`.
+MO and PA (CON3 pins 18 and 19) are enabled by `0x0211` Param1 bit 8, exposed
+as `mo(True)` or `configure(mo=True)`. With the bit clear both stay low however
+long the engine runs, which is why the `0x0281` / `0x0280` command pair appears
+to do nothing: it is not what drives them. With it set, both come up as the job
+starts and drop when it ends. They are amplifier enables on the laser side, so
+the bit is off by default and `laser_off()` clears it. Set it before `begin()`;
+it takes effect with the next job header.
 
 `pwm_burst` is closed-loop against the board's own counter. Open-loop pacing
 drains the queue between chunks and the output visibly drops to tickle-only

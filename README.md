@@ -130,6 +130,7 @@ Verified on hardware with a scope.
 | Inputs | IN0, IN1, IN2, REMARK |
 | SGIN | laser fault line plus `abort()` and `guard()` |
 | Outputs | OUT0, OUT1 via `0x0111` |
+| MO / PA | `0x0211` Param1 bit 8. Both come up when the job starts and drop when it ends |
 | Stepper | pulse count, rate, direction, symmetric accel/decel |
 | Millimetre coordinates | field size, offsets, aspect, mirror and swap, read from `markcfg0` or created if there is none |
 
@@ -144,7 +145,6 @@ Verified on hardware with a scope.
 | Linux, macOS | backend written, never run |
 | **.cor files** | **unfinished feature.** On hold until a real `.cor` turns up to test against, so `load_cor()` raises rather than guessing. The transform side is done: calibrate with `GridCorrection.from_points()` meanwhile |
 | Galvo distortion terms | `GALVODISTOR`, `GALVOHORVER`, `GALVOTRAPEDISTOR` are all `1.0` (identity) in the available config, so the conventional model used for them is unverified |
-| **MO / PA** | not host controlled, and not engine driven either. A 6 s mark, 6 s idle, 6 s mark run produced no assertion on either pin, just one brief MO pulse. `0x0281` MO-on does nothing, nor does a non-zero `0x0208`, nor `0x0211` Param1 swept by nibble and by single bit. Both are push-pull 5 V here, so the readings are real drive. PRR and P0 are correct in the same runs, so the job executes. Laser-type gating is the one lead left, since GATE only works on types `0x33` and `0x44` |
 | **EMSTOP** | sits at 5 V and never moves. Nothing in the command set drives it and no software here can assert it, so it looks like a pure hardware interlock line rather than something the host can read or control |
 | SGIN0..2 | OR'd into one bit, so you learn *that* a fault fired, never *which* |
 | SGIN3 | on the connector, in no status field |

@@ -64,13 +64,15 @@ class Job:
         self._power = 50                 # percent
         self._power_byte = 0x80
         self._mopa_pulse = None
+        self._mo = False                 # MO / PA enable, 0x0211 Param1 bit 8
         self._tickle = self.laser.tickle      # CO2 gets a tickle by default
         self._tick_khz = self.laser.tick_khz
         self._tick_us = self.laser.tick_us
         return self.laser
 
     def configure(self, freq_khz=None, power_pct=None, power_byte=None,
-                  mopa_pulse=None, tickle=None, tick_khz=None, tick_us=None):
+                  mopa_pulse=None, tickle=None, tick_khz=None, tick_us=None,
+                  mo=None):
         """Set the laser parameters for this job.
 
         power_pct is PWM duty; power_byte is the 8-bit parallel word on P0..P7.
@@ -95,6 +97,8 @@ class Job:
             if not self.laser.mopa_pulse:
                 raise ValueError("%s has no pulse-width setting" % self.laser.name)
             self._mopa_pulse = mopa_pulse
+        if mo is not None:
+            self._mo = bool(mo)
         if tick_khz is not None or tick_us is not None:
             self.tick(freq_khz=tick_khz, width_us=tick_us, enable=None)
         if tickle is not None:
@@ -113,6 +117,7 @@ class Job:
             "power_pct": self._power,
             "power_byte": self._power_byte,
             "mopa_pulse": self._mopa_pulse,
+            "mo": self._mo,
             "tickle": self._tickle,
             "tick_khz": self._tick_khz if self.laser.tickle else None,
             "tick_us": self._tick_us if self.laser.tickle else None,
@@ -271,7 +276,8 @@ class Job:
         tus = getattr(self, "_tick_us", 1.0)
         tperiod = int(round(48000.0 / tk))
         twidth = int(round(tus * 48))
-        h = S.cmd(0x0211, (self.laser_type << 8), 0, 0, 0, 0)
+        h = S.cmd(0x0211, (self.laser_type << 8),
+                  S.MO_ENABLE if self._mo else 0, 0, 0, 0)
         h += pwr
         if self._mopa_pulse is not None:
             h += S.cmd(0x0206, 0xA501, self._mopa_pulse & 0xFFFF, 0, 0, 0)
@@ -441,26 +447,21 @@ class Job:
         return value12 & 0x0FFF
 
     def mo(self, on=True):
-        """Master oscillator command pair (CON3 pin 18).
+        """Master oscillator and power amplifier enable (CON3 pins 18 and 19).
 
-            0x0281 = MO on, 0x0280 = MO off
+        This is 0x0211 Param1 bit 8, not the 0x0281 / 0x0280 command pair. That
+        pair has no observable effect on either pin, and neither does running
+        the engine: a 6 s mark, 6 s idle, 6 s mark run with the bit clear left
+        MO and PA low the whole time. With the bit set they both come up as the
+        job starts and drop when it ends.
 
-        The bool literally is part of the opcode: 0x280 + on.
+        MO and PA are amplifier enables on the laser side, so this is off by
+        default and has to be asked for. laser_off() clears it.
 
-        NO OBSERVABLE EFFECT on pin 18: the marking engine asserts MO by itself,
-        and pin 18 tracks engine activity (red-light preview counts) rather than
-        lasing. Sending 0x0281 while idle does not raise it. Provided for
-        completeness; to hold MO high, keep vectors streaming.
+        Takes effect on the next job header. Call it before begin().
         """
-        self._cmd(S.cmd(0x0106))
-        self._cmd(S.cmd(0x0105))
-        self._cmd(S.cmd(0x0104))
-        blob = S.cmd(0x0211, (self.laser_type << 8), 0, 0, 0, 0)
-        blob += S.set_power_raw(self._freq, 0x80)
-        blob += S.cmd(0x0281 if on else 0x0280, 0, 0, 0, 0, 0)
-        blob += S.cmd(0x0208, 0, 0, 0, 0, 0)
-        self.b.write_data(blob)
-        return on
+        self._mo = bool(on)
+        return self._mo
 
     # 0x0230 Param4 flag bits
     AX_REVROT    = 0x100     # +0x06 REVROT  -> DIR pin (verified on scope)
@@ -657,7 +658,8 @@ class Job:
         reset. Order matters: arming first would restart the engine with the
         old values still loaded and emit a burst on the way down.
         """
-        blob = S.cmd(S.CMD_POWER, 0, 0, 0, 0, 0)       # period, width, power = 0
+        blob = S.cmd(0x0211, (self.laser_type << 8), 0, 0, 0, 0)  # MO / PA off
+        blob += S.cmd(S.CMD_POWER, 0, 0, 0, 0, 0)      # period, width, power = 0
         blob += S.cmd(S.CMD_TICK, 0x0000, 0, 0, 0, 0)  # tickle disabled
         blob += S.cmd(S.CMD_LASER_GATE, 0, 0, 0, 0, 0)
         try:
@@ -671,6 +673,7 @@ class Job:
             pass
         finally:
             self._tickle = False
+            self._mo = False
             self._live = False
             try:
                 self._cmd(S.cmd(S.CMD_CLEAR_CACHE))

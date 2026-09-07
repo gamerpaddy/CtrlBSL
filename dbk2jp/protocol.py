@@ -31,6 +31,12 @@ CMD_AXIS_P232  = 0x0232
 CMD_AXIS_GO    = 0x0233
 CMD_PORT_PULSE = 0x2F82
 
+# 0x0211 Param1 flag bits. Bits 0..6 are the documented axis/PWM flags; bit 8
+# is the MO / PA enable, found on the scope: with it clear, MO and PA stay low
+# no matter how long the engine runs or what else the header carries. With it
+# set they both come up as soon as the job starts and drop when it ends.
+MO_ENABLE = 0x0100
+
 FPGA_CLK_KHZ = 48000.0      # timebase for every period/width field
 
 
