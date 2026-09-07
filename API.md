@@ -13,9 +13,9 @@ per laser type, see [EXAMPLES.md](EXAMPLES.md).
 - Python 3.8+.
 - **Windows**: no third-party packages (`ctypes` + `winreg`), and the board bound
   to Cypress's **CYUSB3** driver. No admin rights needed.
-- **Linux / macOS**: `pip install pyusb` plus libusb. **Untested** -- written
-  against the protocol, not verified on non-Windows hardware. Linux needs usbfs
-  access, so either root or a udev rule:
+- **Linux**: `pip install pyusb` plus libusb. Verified on hardware:
+  enumeration, unlock, status and marking. macOS uses the same backend and is
+  still to be tried. Linux needs usbfs access, so either root or a udev rule:
 
   ```
   # /etc/udev/rules.d/99-dbk2jp.rules
@@ -23,6 +23,13 @@ per laser type, see [EXAMPLES.md](EXAMPLES.md).
   ```
 
 The public API is identical on both. Only the transport differs.
+
+On Linux a stalled endpoint survives a close, so a finished job could leave the
+pipes halted and the next process would enumerate, unlock and report status
+while every transfer that mattered went nowhere: the symptom is a first run that
+marks and a second that stays silent. The backend clears the halts on
+open and on close, the open side also covering a process that was killed before
+it could clean up.
 
 Zero install: put the `dbk2jp/` folder next to your script.
 
@@ -55,7 +62,7 @@ matters if you build commands yourself.
 |---|---|
 | `dbk2jp/usb.py` | `Board`: discovery, command framing, backend selection |
 | `dbk2jp/_cyusb.py` | Windows backend -- CYUSB3.sys IOCTLs |
-| `dbk2jp/_libusb.py` | Linux/macOS backend -- pyusb bulk transfers (untested) |
+| `dbk2jp/_libusb.py` | Linux/macOS backend -- pyusb bulk transfers, verified on Linux |
 | `dbk2jp/protocol.py` | the 12-byte `tagSeaCMD` wire format, opcode constants, parameter packing |
 | `dbk2jp/unlock.py` | the 3-frame ATSHA204 replay that turns the 加密 LED green |
 | `dbk2jp/field.py` | millimetres to galvo counts (`Field`), `markcfg0` reader |

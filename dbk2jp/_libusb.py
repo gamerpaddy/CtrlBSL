@@ -15,7 +15,16 @@ rule:
     # /etc/udev/rules.d/99-dbk2jp.rules
     SUBSYSTEM=="usb", ATTR{idVendor}=="04b4", ATTR{idProduct}=="1004", MODE="0666"
 
-UNTESTED -- written against the protocol, not verified on Linux hardware.
+Confirmed on Linux hardware: enumeration, unlock, status and marking all work.
+macOS is still to be tried.
+
+One Linux-specific detail, and it bites on the second run rather than the
+first: the endpoints keep any stalled state across a close, so a job that
+finishes leaves the pipes halted and the next process enumerates, unlocks and
+reports status happily while every transfer that matters goes nowhere. The
+Windows driver clears this on handle close; libusb leaves it to the caller. So
+_clear_halts() runs on open as well as close, which also recovers from a
+process that was killed before it could clean up.
 """
 
 VID, PID = 0x04B4, 0x1004
@@ -75,9 +84,30 @@ class Transport:
                 "cannot claim %s: %s. On Linux this is usually permissions -- "
                 "add a udev rule (see the module docstring) or run as root."
                 % (self.path, e))
+        # Inherit nothing from whoever had the board last.
+        self._clear_halts()
+
+    def _clear_halts(self):
+        """Clear a stall on all four endpoints.
+
+        Imported here rather than at module scope: usb.py imports this backend,
+        so a top-level import would be circular.
+        """
+        from .usb import EP_CTRL_IN, EP_DATA_IN, EP_CTRL_OUT, EP_DATA_OUT
+        for ep in (EP_CTRL_IN, EP_DATA_IN, EP_CTRL_OUT, EP_DATA_OUT):
+            try:
+                self.dev.clear_halt(ep)
+            except Exception:
+                pass                  # already clear, or the device is gone
 
     def close(self):
         if getattr(self, "dev", None) is not None:
+            try:
+                # Before releasing: a stall left on an endpoint survives the
+                # close, and the next process silently fails to mark.
+                self._clear_halts()
+            except Exception:
+                pass
             try:
                 self._util.release_interface(self.dev, 0)
                 self._util.dispose_resources(self.dev)

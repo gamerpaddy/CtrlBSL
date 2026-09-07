@@ -14,11 +14,17 @@ Python 3.8+. Drop the `dbk2jp/` folder next to your script.
 | Platform | Needs | State |
 |---|---|---|
 | Windows | stdlib only (`ctypes` + `winreg`), board on the CYUSB3 driver | verified on hardware |
-| Linux / macOS | `pip install pyusb` plus libusb; Linux needs a udev rule or root | **untested** |
+| Linux | `pip install pyusb` plus libusb; needs a udev rule or root | verified on hardware |
+| macOS | `pip install pyusb` plus libusb | still to be tried |
 
-The Linux path is written against the protocol but has not been run on real
-hardware yet. Same `Board` and `Job` on every platform; only the transport
-module differs.
+Same `Board` and `Job` on every platform; only the transport module differs.
+Enumeration, unlock, status and marking are all confirmed on Linux.
+
+One Linux quirk worth knowing, since it shows up on the **second** run rather
+than the first: libusb leaves a stalled endpoint stalled across a close, so an
+earlier job could leave the pipes halted and the next process would enumerate,
+unlock and print status while every transfer that mattered went nowhere. The
+backend clears the halts on open and on close, so this is handled.
 
 Examples: **[EXAMPLES.md](EXAMPLES.md)**  |  Full reference: **[API.md](API.md)**
 
@@ -164,7 +170,7 @@ Verified on hardware with a scope.
 | **DA1** analog (pin 15) | reads 0 V. `ENPOWERANALOGOUT=0`, and every other software on this machine leaves the pin alone too, so this looks like machine config rather than protocol |
 | MOPA | frame verified on the wire, optical result not. Type code 0x55 mutes every output on the board tested |
 | UV, green, YAG | type codes unverified |
-| Linux, macOS | backend written, still to be run on hardware |
+| macOS | backend written, still to be tried |
 | **.cor files** | **unfinished feature.** On hold until a real `.cor` turns up to test against, so `load_cor()` raises rather than guessing. The transform side is done: calibrate with `GridCorrection.from_points()` meanwhile |
 | Galvo distortion terms | `GALVODISTOR`, `GALVOHORVER`, `GALVOTRAPEDISTOR` are all `1.0` (identity) in the available config, so the conventional model used for them is unverified |
 | **EMSTOP** | sits at 5 V throughout every test. The command set leaves it alone and the software here leaves it alone, so it looks like a pure hardware interlock line, readable and drivable only from hardware |
