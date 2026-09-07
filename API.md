@@ -228,8 +228,9 @@ Also `python -m dbk2jp field [path] [key=value ...]`.
 Out-of-field coordinates raise unless `clamp=True`. `Field` carries field size,
 offsets, per-axis aspect, mirror and axis swap (all exact) plus the barrel,
 horizontal-vertical and trapezoid terms (conventional model, unverified: every
-one is `1.0` in the available config). `Field.correction` takes a `Correction`
-from `cor.py`; see EXAMPLES.md for the `.cor` situation.
+one is `1.0` in the available config). `Field.correction` takes a `Correction` from `cor.py`. Reading a `.cor` file is
+an **unfinished feature**; correcting a field from measured points works today.
+See EXAMPLES.md.
 
 ### Marking
 

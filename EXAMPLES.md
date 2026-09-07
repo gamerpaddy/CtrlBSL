@@ -386,29 +386,31 @@ are implemented with the conventional galvo model and are a **no-op at 1.0**,
 which is what most real configs carry. If yours differs, check a test pattern
 before trusting it.
 
-### Optical correction (.cor)
+### Optical correction
 
-**Not working, scaffold only.** A galvo head does not paint a perfect square,
-and machines ship a per-head correction table applied on the host. Nothing in
-this board's command set takes one, so it has to happen here.
+A galvo head does not paint a perfect square, and machines ship a per-head
+correction table applied on the host. Nothing in this board's command set takes
+one, so it has to happen here.
 
-What was established: a `.cor` is a **text** file carrying a grid of measured
-calibration points, in nominal/actual pairs, that are fitted to **coefficients**
-rather than being used as a ready-made lookup grid.
-
-What was not: the token grammar. No `.cor` file was available to test a guess
-against, so `load_cor()` raises instead of returning a subtly wrong transform.
+**Reading a `.cor` file is an unfinished feature.** It is on hold until a real
+one turns up to test against: no sample was available and the tool that
+generates them could not be run, so there was nothing to check an
+implementation against. `load_cor()` raises rather than returning a transform
+that might be subtly wrong, since a bad correction still puts the beam
+somewhere plausible.
 
 ```python
 from dbk2jp import load_cor
 load_cor("machine.cor")
-# NotImplementedError: machine.cor: 4096 bytes, looks like text. Parsing is
-# not implemented -- see dbk2jp/cor.py
+# NotImplementedError: machine.cor: 4096 bytes, looks like text. .cor parsing
+# is an unfinished feature -- see dbk2jp/cor.py
 ```
 
-The transform side is finished and wired into `Field`, so filling in
-`parse_cor()` is the only remaining work. Meanwhile you can calibrate from
-measured points, which is how calibration works anyway:
+It still reads the file and reports its shape, which is the first thing needed
+to finish the feature.
+
+**Correcting a field works today**, by measuring points yourself, which is how
+calibration works anyway:
 
 ```python
 from dbk2jp import Field, GridCorrection, Job, CO2

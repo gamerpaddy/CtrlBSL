@@ -143,7 +143,7 @@ Verified on hardware with a scope.
 | MOPA | pulse width and type code both unverified, no MOPA laser here |
 | UV, green, YAG | type codes unverified |
 | Linux, macOS | backend written, never run |
-| **.cor files** | a text format carrying calibration points fitted to coefficients rather than a lookup grid. The grammar is not known and there was no sample file to test a guess against, so `load_cor()` raises. The transform side is done: calibrate with `GridCorrection.from_points()` meanwhile |
+| **.cor files** | **unfinished feature.** On hold until a real `.cor` turns up to test against, so `load_cor()` raises rather than guessing. The transform side is done: calibrate with `GridCorrection.from_points()` meanwhile |
 | Galvo distortion terms | `GALVODISTOR`, `GALVOHORVER`, `GALVOTRAPEDISTOR` are all `1.0` (identity) in the available config, so the conventional model used for them is unverified |
 | **EMSTOP** | sits at 5 V and never moves. Nothing in the command set drives it and no software here can assert it, so it looks like a pure hardware interlock line rather than something the host can read or control |
 | SGIN0..2 | OR'd into one bit, so you learn *that* a fault fired, never *which* |

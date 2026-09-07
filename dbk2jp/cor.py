@@ -1,5 +1,5 @@
 """
-Optical distortion correction from a .cor file. SCAFFOLD, NOT WORKING.
+Optical distortion correction from a .cor file. UNFINISHED FEATURE.
 
 A galvo head does not paint a perfect square: the two mirrors sit at different
 distances from the lens, so the field is barrelled and skewed. Machines ship a
@@ -7,37 +7,40 @@ per-head correction table in a `.cor` file, applied on the host before the
 coordinates ever reach the board. This board is no different: nothing in the
 command set takes a correction table, so it has to happen here.
 
-WHAT IS KNOWN
--------------
-A `.cor` is a **text** file, and it carries a grid of measured calibration
-points that get **fitted to coefficients** rather than being used as a raw
-lookup table. The points come in nominal/actual pairs on a grid of at least
-3x3.
+STATUS
+------
+On hold until a real `.cor` file turns up to test against. No sample was
+available, and the tool that generates them could not be run here, so there was
+nothing to check an implementation against. `load_cor()` and `parse_cor()`
+raise rather than returning a transform that might be subtly wrong: a bad
+correction is worse than none, because the beam still lands somewhere
+plausible.
 
-WHAT IS NOT KNOWN
------------------
-The token grammar of the file, and no `.cor` was available to check a guess
-against. So `load_cor()` deliberately raises rather than returning a wrong
-transform: a correction that is subtly wrong is worse than none, because the
-beam still goes somewhere plausible.
+What the format is believed to be, unconfirmed: a text file carrying a grid of
+measured calibration points in nominal/actual pairs, at least 3x3, fitted to
+coefficients rather than used as a raw lookup table.
 
-USING IT ANYWAY
----------------
-The transform interface is finished and wired into `Field`, so once the format
-is known only `parse_cor()` has to be filled in. Both usual fit shapes are
-implemented and testable today:
+WHAT WORKS TODAY
+----------------
+Everything except reading the file. The transform interface is finished and
+wired into `Field`, and both usual fit shapes are implemented and tested, so
+you can correct a field right now by measuring points yourself:
 
-    from dbk2jp import Field, GridCorrection, PolyCorrection
+    from dbk2jp import Field, GridCorrection
 
-    # measured points: (nominal_mm, actual_mm) pairs
+    # mark a grid, measure where it landed: (nominal_mm, actual_mm)
     c = GridCorrection.from_points([((-20, -20), (-19.4, -20.3)),
                                     ((20, -20), (20.6, -20.2)),
                                     ((20, 20), (20.5, 19.6)),
                                     ((-20, 20), (-19.5, 19.7))])
     field = Field(size_mm=100, correction=c)
 
-If you have a `.cor` for this board, `parse_cor()` is the one function to
-write, and a dump of the first few hundred bytes is enough to start.
+`PolyCorrection(cx, cy)` covers the coefficient form.
+
+FINISHING IT
+------------
+`parse_cor()` is the only function to write. Everything downstream already
+works, so it just has to return a `PolyCorrection` or a `GridCorrection`.
 """
 
 
@@ -153,34 +156,33 @@ class GridCorrection(Correction):
 
 
 def parse_cor(data):
-    """Turn the bytes of a .cor into a Correction. NOT IMPLEMENTED.
+    """Turn the bytes of a .cor into a Correction. UNFINISHED.
 
-    Fill this in when you have a file. What is already established: it is a
-    text format carrying calibration points that get fitted to coefficients,
-    rather than a ready-made lookup table. Return a PolyCorrection or a
+    The one function left to write. Return a PolyCorrection or a
     GridCorrection; everything downstream already works.
     """
     raise NotImplementedError(
-        "the .cor text grammar is not known and no sample file was available "
-        "to verify a guess. See dbk2jp/cor.py for what is established. "
-        "Until then, calibrate with GridCorrection.from_points(measured_pairs)."
+        ".cor parsing is an unfinished feature: the format could not be "
+        "confirmed without a real file to test against. See dbk2jp/cor.py. "
+        "Calibrate with GridCorrection.from_points(measured_pairs) instead."
     )
 
 
 def load_cor(path):
-    """Read a .cor file and return a Correction. Raises NotImplementedError.
+    """Read a .cor file and return a Correction. UNFINISHED, raises.
 
     The read and the sniffing below are real, so a file dropped in here will at
-    least tell you what shape it is.
+    least report what shape it is, which is the first thing anyone finishing
+    this feature needs to know.
     """
     with open(path, "rb") as fh:
         data = fh.read()
 
     kind = "text" if _looks_like_text(data) else "binary"
     raise NotImplementedError(
-        "%s: %d bytes, looks like %s. Parsing is not implemented -- see "
-        "dbk2jp/cor.py. A text file is expected; anything else means this "
-        "machine's format differs from the one described there."
+        "%s: %d bytes, looks like %s. .cor parsing is an unfinished feature -- "
+        "see dbk2jp/cor.py. If you can share this file, it is the missing "
+        "piece needed to finish it."
         % (path, len(data), kind)
     )
 
