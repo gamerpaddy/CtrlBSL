@@ -174,7 +174,7 @@ j.settings()                                 # what will go on the wire
 
 | Type | Code | Power | Tickle | Pulse width | Verified |
 |---|---|---|---|---|---|
-| `CO2` | `0x22` | PWM duty | yes | no | yes |
+| `CO2` | `0x22` | PWM duty | yes, on by default | no | yes |
 | `FIBER` | `0x11` | byte on P0-P7 | no | no | yes |
 | `UV` | `0x33` | PWM duty | no | no | no |
 | `GREEN` | `0x44` | PWM duty | no | no | no |

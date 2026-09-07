@@ -30,19 +30,23 @@ class Laser:
                        PLATCH strobes on change)
     freq_khz    sensible default marking frequency
     freq_range  (min, max) kHz the board was seen to produce
-    tickle      laser wants a tickle/pre-ionisation train when idle
+    tickle      laser wants a tickle/pre-ionisation train when idle, and gets
+                one by default. tick_khz/tick_us are that default shape.
     mopa_pulse  laser takes a pulse-width setting (0x0206)
     verified    the type code was confirmed on hardware
     """
 
     def __init__(self, name, code, power, freq_khz, freq_range,
-                 tickle=False, mopa_pulse=False, verified=False, note=""):
+                 tickle=False, mopa_pulse=False, verified=False, note="",
+                 tick_khz=5.0, tick_us=1.0):
         self.name = name
         self.code = code
         self.power = power
         self.freq_khz = freq_khz
         self.freq_range = freq_range
         self.tickle = tickle
+        self.tick_khz = tick_khz
+        self.tick_us = tick_us
         self.mopa_pulse = mopa_pulse
         self.verified = verified
         self.note = note
@@ -55,7 +59,9 @@ class Laser:
 
 LASERS = {
     CO2: Laser(CO2, 0x22, "pwm", 20.0, (1.0, 40.0), tickle=True, verified=True,
-               note="PWM duty is the power. Tickle is a separate free-running "
+               tick_khz=5.0, tick_us=1.0,
+               note="PWM duty is the power. Tickle is on by default: a CO2 tube "
+                    "wants priming between marks. It is a separate free-running "
                     "generator, muxed out while marking."),
     FIBER: Laser(FIBER, 0x11, "byte", 20.0, (1.0, 40.0), verified=True,
                  note="Power is the 8-bit word on P0..P7, static and latched. "

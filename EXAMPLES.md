@@ -20,13 +20,15 @@ corners. `speed` is the galvo rate for that move.
 
 Power is **PWM duty** on the marking line. CO2 is the only type with a
 **tickle**: a separate free-running pre-ionisation train that keeps the tube
-primed between marks.
+primed between marks. `Job(CO2)` enables it by default at 5 kHz / 1 us, since a
+tube normally wants it.
 
 ```python
 from dbk2jp import Job, CO2
 
 with Job(CO2) as j:
     j.configure(freq_khz=20, power_pct=40)      # 20 kHz, 40% duty
+                                                # tickle already on at 5 kHz / 1 us
     j.begin(start=(0x4000, 0x4000), speed=300)
     j.lines([(0xC000, 0x4000),
              (0xC000, 0xC000),
@@ -37,12 +39,13 @@ with Job(CO2) as j:
 ### Tickle
 
 A separate free-running generator with its own period and width, independent of
-the marking PWM. `tick()` sets the shape, `configure(tickle=True)` enables it.
+the marking PWM. It is **on by default for CO2**; `tick()` changes the shape and
+`configure(tickle=False)` switches it off for a job.
 
 ```python
 with Job(CO2) as j:
-    j.tick(freq_khz=5.0, width_us=1.0)          # 5 kHz, 1 us pulses
-    j.configure(freq_khz=20, power_pct=40, tickle=True)
+    j.tick(freq_khz=10.0, width_us=2.0)         # override the 5 kHz / 1 us default
+    j.configure(freq_khz=20, power_pct=40)
     j.begin(start=(0x4000, 0x8000), speed=300)
     j.lines([(0xC000, 0x8000)], speed=300)
 ```
@@ -91,10 +94,13 @@ with Job(CO2) as j:
 does not. If a pin is still ticking from an earlier run, the snippet above
 clears it.
 
-Disabling it for one job while leaving the shape configured:
+Marking with no tickle at all, leaving the shape configured:
 
 ```python
-j.configure(tickle=False)
+with Job(CO2) as j:
+    j.configure(freq_khz=20, power_pct=40, tickle=False)
+    j.begin(start=(0x4000, 0x8000), speed=300)
+    j.lines([(0xC000, 0x8000)], speed=300)
 ```
 
 The tickle does **not** appear in the low phases of the marking PWM. The board

@@ -53,7 +53,9 @@ class Job:
         self._power = 50                 # percent
         self._power_byte = 0x80
         self._mopa_pulse = None
-        self._tickle = False
+        self._tickle = self.laser.tickle      # CO2 gets a tickle by default
+        self._tick_khz = self.laser.tick_khz
+        self._tick_us = self.laser.tick_us
         return self.laser
 
     def configure(self, freq_khz=None, power_pct=None, power_byte=None,

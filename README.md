@@ -32,7 +32,7 @@ Mark a square:
 from dbk2jp import Job, CO2
 
 with Job(CO2) as j:                        # opens, unlocks, arms the board
-    j.configure(freq_khz=20, power_pct=40)
+    j.configure(freq_khz=20, power_pct=40)  # CO2 gets a 5 kHz / 1 us tickle
     j.begin(start=(0x4000, 0x4000), speed=300)
     j.lines([(0xC000, 0x4000),             # coordinates are 16-bit,
              (0xC000, 0xC000),             # 0x8000 is field centre
@@ -69,7 +69,7 @@ with Job(FIBER) as j:
 
 | Type | Code | Power | Notes |
 |---|---|---|---|
-| `CO2` | `0x22` | PWM duty | has a tickle generator, verified |
+| `CO2` | `0x22` | PWM duty | tickle on by default (5 kHz, 1 us), verified |
 | `FIBER` | `0x11` | byte on P0..P7 | latched, PLATCH strobes on change, verified |
 | `UV` | `0x33` | PWM duty | code unverified |
 | `GREEN` | `0x44` | PWM duty | code unverified |
