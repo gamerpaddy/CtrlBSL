@@ -47,11 +47,9 @@ def parse(reply):
 
 def set_power_0210(freq_khz, power_pct, wait=0):
     """
-    Build CMD 0x0210 exactly as CCmdExecutor::SetPower @ 1006b290 does for the
-    non-type-6 USB path.
+    Build CMD 0x0210, the marking power/frequency word.
 
-    Ghidra typed the buffer as tagSeaCMDNet, which mislabels the fields; by raw
-    offset the writes are:
+    By raw offset the fields are:
         +0x00 CMD_ID = 0x0210
         +0x02 Param0 = 0
         +0x04 Param1 = (period >> 8) & 0xFF | (round(freq*0.5) << 8)

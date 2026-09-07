@@ -1,11 +1,10 @@
 # `dbk2jp` - API reference
 
-Drive a BSL/SeaCAD **DBK2JP** galvo laser controller directly over USB, without
-BslApp/SeaCAD or LightBurn.
+Drive a BSL/SeaCAD **DBK2JP** galvo laser controller directly over USB, with no
+proprietary or paid software.
 
-Every number here was recovered by decompiling the vendor DLLs and verified on
-real hardware with a scope. For runnable code per laser type, see
-[EXAMPLES.md](EXAMPLES.md).
+Every number here was verified on real hardware with a scope. For runnable code
+per laser type, see [EXAMPLES.md](EXAMPLES.md).
 
 ---
 
@@ -75,6 +74,7 @@ python -m dbk2jp unlock [set]      # replay the auth frames
 python -m dbk2jp inputs [secs]     # live input/SGIN view with edge timings
 python -m dbk2jp out <port> <0|1>  # set an output port
 python -m dbk2jp jump <x> <y>      # move the galvos
+python -m dbk2jp field [path] [key=value ...]   # scan field, creates if missing
 ```
 
 ---
@@ -200,14 +200,24 @@ period; both are checked.
 
 `0x0206`, `Param0 = 0xA501`, `Param1 = pulse`, on EP 0x02. Set it through
 `configure(mopa_pulse=...)` for the next job, or `mopa_pulse(value)` to send it
-now. Read out of the vendor pen-parameter path, which emits it whenever
-`nMopaPulse` changes. **Untested** - no MOPA laser here.
+now. **Untested** - no MOPA laser here.
 
 ### Millimetres
 
 ```python
-Job(CO2, field=Field.from_markcfg("markcfg0"))
+Job(CO2, field=Field.load_or_create("markcfg0"))
 ```
+
+| Field method | Notes |
+|---|---|
+| `Field(size_mm=..., offset_mm=..., ...)` | state the field inline |
+| `Field.from_markcfg(path)` | load an existing config, raises if missing |
+| `Field.load_or_create(path, **defaults)` | load, writing a default config first if there is none. `field.created` says which happened |
+| `field.set(**factors)` | adjust in place, validated |
+| `field.save(path=None)` | write back, preserving keys this library does not use |
+| `field.as_markcfg()` | the factors as config key/value strings |
+
+Also `python -m dbk2jp field [path] [key=value ...]`.
 
 | Method | Notes |
 |---|---|
@@ -360,14 +370,13 @@ Most likely a board-variant pin this firmware never drives.
 
 `j.dac()` produces no voltage. `ENPOWERANALOGOUT=0` in `markcfg0`, and
 `SendPenPara` only emits the analog command (`0x0207`) for `iLsrType` 0 or 6.
-**BslApp fails to drive it too**, so this is a machine-config issue, not a
+**No other software drives it here either**, so this is a machine-config issue, not a
 protocol gap.
 
 ### EMSTOP - not readable or drivable
 
 The pin sits at 5 V and never changed across any test. No command in the set
-moves it, it appears in no status field, and the vendor software exposes no way
-to assert it. It behaves as a hardware interlock line that the host is simply
+moves it, it appears in no status field, and nothing here can assert it. It behaves as a hardware interlock line that the host is simply
 not part of.
 
 This matters for safety design: you cannot read emergency-stop state over USB,
@@ -385,7 +394,7 @@ above, which has the same limitation for a different reason.
 ### Closed as not protocol issues
 
 Tickle-during-mark: the board multiplexes the tickle out while marking, and the
-vendor software behaves identically. Hardware, not a gap in this API.
+other software behaves identically. Hardware, not a gap in this API.
 
 ---
 

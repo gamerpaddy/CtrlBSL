@@ -2,8 +2,7 @@
 Unlock the DBK2JP board (加密 LED red -> green).
 
 The board carries an Atmel ATSHA204A authentication chip reached through the
-0x0C5C / 0x0C5D passthrough on EP 0x06.  From SeaMark.dll
-(CSHADigest::Sha256Encrypt @ 0x10075b80) the exchange is:
+0x0C5C / 0x0C5D passthrough on EP 0x06.  The exchange is:
 
     digestInput[0x00..0x1F] = DataSlot[0]         # 32-byte key, read in clear
     digestInput[0x20..0x3F] = 32 random bytes     # challenge, drawn ONCE per
@@ -63,7 +62,7 @@ from .protocol import cmd
 #  10      0x0C5D  host-computed SHA-256 digest, 32 bytes
 #  11..17  ATSHA204 MAC(challenge) -> chip digest   <-- the authentication
 #  18..66  0x0102 GetEncryptState, then Read(data zone 0x2000/0x3000/0x3800),
-#          each issued twice; BslApp's CheckCardRegisteStatus, not the gate
+#          each issued twice; a licence check on the host side, not the gate
 #  67..73  reset / arm: 0x0106 0x0105 0x0104 [EP02 blob] 0x0105 0x0118 0x0105
 
 FRAMES = [

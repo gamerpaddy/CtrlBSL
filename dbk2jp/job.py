@@ -173,14 +173,13 @@ class Job:
 
         0x0111 takes the port index in the HIGH BYTE of Param0 and the level in
         Param1 -- not a bitmask in Param0, which is why writing 0x0001 there
-        does nothing. Goes on EP 0x06 (SetPortOutput uses the +0x80 immediate
-        path, not the EP 0x02 batch).
+        does nothing. Goes on EP 0x06, the immediate path, not the EP 0x02 batch.
         """
         return self._cmd(S.cmd(0x0111, (port & 0xFF) << 8, value & 0xFFFF))
 
     def out_pulse(self, port, value, ms):
-        """Timed output pulse via 0x2F82. UNTESTED -- packing read off
-        SetPortOutput's duration>=0 branch, which routes to EP 0x02."""
+        """Timed output pulse via 0x2F82 on EP 0x02, duration scaled by 2000.
+        UNTESTED."""
         ticks = int(ms) * 2000
         blob = S.cmd(0x2F82,
                      ((port & 0xFF) << 8) | (1 if ms > 0 else 0),
@@ -210,8 +209,7 @@ class Job:
     def mopa_pulse(self, value):
         """MOPA pulse width, 0x0206 Param0=0xA501 Param1=value, on EP 0x02.
 
-        Read off CCmdExecutor's pen-parameter path, which sends it whenever
-        nMopaPulse changes. UNTESTED -- no MOPA laser here to measure.
+        UNTESTED -- no MOPA laser here to measure.
         """
         self._mopa_pulse = value
         self.b.write_data(S.cmd(0x0206, 0xA501, value & 0xFFFF, 0, 0, 0))
@@ -407,8 +405,8 @@ class Job:
         NOT CONFIRMED WORKING -- produced no voltage on this board under every
         condition tried (idle, while marking, and with the word placed in each
         of Param0..Param4). Kept because the encoding is correct per
-        CCmdExecutor::SendPenPara; the gate is believed to be a board-side
-        analog enable that no decompiled command writes. See DBK2JP_PROTOCOL.md.
+        the gate is believed to be a board-side
+        analog enable that no observed command writes. See DBK2JP_PROTOCOL.md.
         """
         self._cmd(S.cmd(0x0106))
         self._cmd(S.cmd(0x0105))
@@ -427,9 +425,7 @@ class Job:
 
             0x0281 = MO on, 0x0280 = MO off
 
-        CCmdExecutor::SetMoDelay @ 1006d8d0 builds the ID as htons(param_1 + 0x280),
-        so the bool literally is the opcode -- which is why a scan for literal
-        htons() constants missed this pair entirely.
+        The bool literally is part of the opcode: 0x280 + on.
 
         NO OBSERVABLE EFFECT on pin 18: the marking engine asserts MO by itself,
         and pin 18 tracks engine activity (red-light preview counts) rather than
@@ -446,7 +442,7 @@ class Job:
         self.b.write_data(blob)
         return on
 
-    # 0x0230 Param4 flag bits, decoded from SetAxis_0230 against tagAxisPar offsets
+    # 0x0230 Param4 flag bits
     AX_REVROT    = 0x100     # +0x06 REVROT  -> DIR pin (verified on scope)
     AX_FLAG_200  = 0x200     # field@0x82 != 1
     AX_ZEROTYPE  = 0x004     # +0x34 nZeroType
@@ -480,7 +476,7 @@ class Job:
         starts and stops abruptly.
 
         0x0232 Param0 = 175 in every captured jog; purpose unknown but sent for
-        fidelity with the vendor sequence.
+        fidelity with the known-good sequence.
 
         Let the move finish rather than cutting it short with a reset, otherwise
         the deceleration ramp never happens.
@@ -503,7 +499,7 @@ class Job:
         return pulses / float(pps) if pps else 0.0      # expected duration, seconds
 
     def laser_port_switch(self, p1=0, p2=0, p3=0, p4=0, p5=0, p6=0):
-        """0x2F84 SetLaserPortSwitch, from CCmdExecutor::SetLaserPortSwitch @ 1006d1c0:
+        """0x2F84 laser port switch:
             Param0 = p1*0x100 + p4
             Param1 = p5*0x300
             Param2 = p3*2
@@ -524,7 +520,7 @@ class Job:
         0x22 = red light, 0x00 = normal marking. The high byte stays the laser
         type. So for CO2, Param0 = 0x2222 on, 0x2200 off.
 
-        Derived from CCmdExecutor::SetRedLightMark @ 1006c7d0, which is just
+        This is just
         SendLenPara(lmc, p2, p3) + flush, with p3 as the red-light flag.
 
         It latches: once the header is sent the pointer stays on with nothing

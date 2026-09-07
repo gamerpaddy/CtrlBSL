@@ -123,11 +123,10 @@ with Job(CO2) as j:
 
 The tickle does **not** appear in the low phases of the marking PWM. The board
 multiplexes it out while marking, so you get tickle or marking, never both
-interleaved. That is hardware behaviour: the vendor software does exactly the
-same thing.
+interleaved. That is hardware behaviour, not a limitation here.
 
 **Analog power (DA1, pin 15) does not work.** `ENPOWERANALOGOUT=0` in the
-machine config and the vendor software cannot drive it either. Use PWM duty.
+machine config, and nothing else drives it on this machine either. Use PWM duty.
 
 ---
 
@@ -206,8 +205,8 @@ with Job(MOPA) as j:
         j.lines([(0xC000, y)], speed=400)
 ```
 
-**Untested.** The type code `0x55` and the pulse-width command were both read
-out of the vendor DLLs and never confirmed against a MOPA laser. The config
+**Untested.** The type code `0x55` and the pulse-width command were never
+confirmed against a MOPA laser. The config
 allows 1 kHz to 2 MHz, far above anything measured here, so treat the frequency
 range in `laser.py` as conservative rather than correct.
 
@@ -232,8 +231,8 @@ with Job(GREEN) as j:
     j.lines([(0xC000, 0x4000), (0xC000, 0xC000)], speed=250)
 ```
 
-**Type codes unverified.** `0x33` and `0x44` come from the vendor code and were
-never confirmed with a laser of either type attached. The PWM itself is the same
+**Type codes unverified.** `0x33` and `0x44` were never confirmed with a laser
+of either type attached. The PWM itself is the same
 generator CO2 uses, which is verified.
 
 ---
@@ -282,8 +281,8 @@ with Job(YAG) as j:
 ## Working in millimetres
 
 The board only understands 16-bit galvo counts. `Field` converts, using the
-machine's own `markcfg0` so the numbers match what the vendor software would
-produce.
+machine's own `markcfg0`, so a dimension means the same thing here as anywhere
+else on that machine.
 
 ```python
 from dbk2jp import Job, Field, CO2
@@ -297,10 +296,56 @@ with Job(CO2, field=field) as j:
     j.lines_mm([(20, -20), (20, 20), (-20, 20), (-20, -20)])
 ```
 
-Without a config file, state the field size directly:
+### If the machine has no config
+
+Not every machine ships with a `markcfg0`. `load_or_create()` writes a default
+one the first time and loads it thereafter:
+
+```python
+field = Field.load_or_create("markcfg0", size_mm=110.0)
+if field.created:
+    print("wrote a fresh markcfg0, adjust it for this machine")
+```
+
+Adjust the factors and save. An existing file keeps every key it already has;
+only the field factors are rewritten.
+
+```python
+field.set(size_mm=110.0,
+          offset_mm=(-1.5, 0.25),
+          aspect=(100.0, 99.4),      # per-axis scale in percent
+          negate=(True, False),      # mirror X
+          swap_xy=False).save()
+```
+
+`set()` validates: an unknown factor, a zero field size or an aspect of 0%
+raises rather than writing a config that cannot work.
+
+From the command line, without writing any code:
+
+```bash
+python -m dbk2jp field                              # show, creating if needed
+python -m dbk2jp field size_mm=110                  # adjust and save
+python -m dbk2jp field aspect=100,99.4 negate=1,0
+python -m dbk2jp field /path/to/markcfg0 size_mm=175
+```
+
+Or skip the file entirely and state the field inline:
 
 ```python
 field = Field(size_mm=110.0, offset_mm=(0.0, 0.0))
+```
+
+### Calibrating scale by hand
+
+Mark a square of known nominal size, measure it, and scale:
+
+```python
+field = Field.load_or_create("markcfg0", size_mm=100.0)
+
+# asked for 40 mm, measured 39.6 across X and 40.2 across Y
+field.set(aspect=(field.aspect[0] * 40.0 / 39.6,
+                  field.aspect[1] * 40.0 / 40.2)).save()
 ```
 
 Converting by hand:
@@ -334,8 +379,8 @@ j.jump_mm(80, 0, clamp=True)    # clip to the edge instead
 | `GALVOHORVER0/1` | horizontal-vertical ratio | conventional model, unverified |
 | `GALVOTRAPEDISTOR0/1` | trapezoid / keystone | conventional model, unverified |
 
-The four distortion families are named and applied by the vendor, but the exact
-formulas were not recovered, and in the `markcfg0` available here every one of
+The four distortion families are named and applied, but their exact formulas are
+not known, and in the `markcfg0` available here every one of
 them is `1.0`, meaning identity, so there was nothing to measure against. They
 are implemented with the conventional galvo model and are a **no-op at 1.0**,
 which is what most real configs carry. If yours differs, check a test pattern
@@ -344,18 +389,15 @@ before trusting it.
 ### Optical correction (.cor)
 
 **Not working, scaffold only.** A galvo head does not paint a perfect square,
-and vendors ship a per-head correction table applied on the host. Nothing in
+and machines ship a per-head correction table applied on the host. Nothing in
 this board's command set takes one, so it has to happen here.
 
-What was established: correction lives in `calib.dll`, which exports
-`getCalibCoefFromFile`, `getCalibCoefs` and `preCalibPoint`. A `.cor` is a
-"UCF" file parsed by `loadUcf` with C++ stream extraction into doubles, so it is
-**text**, and it carries calibration points that are fitted to **coefficients**
-rather than being a ready-made lookup grid.
+What was established: a `.cor` is a **text** file carrying a grid of measured
+calibration points, in nominal/actual pairs, that are fitted to **coefficients**
+rather than being used as a ready-made lookup grid.
 
-What was not: the token grammar. It could not be recovered from the decompile
-and no `.cor` file was available to test a guess, so `load_cor()` raises instead
-of returning a subtly wrong transform.
+What was not: the token grammar. No `.cor` file was available to test a guess
+against, so `load_cor()` raises instead of returning a subtly wrong transform.
 
 ```python
 from dbk2jp import load_cor
@@ -366,7 +408,7 @@ load_cor("machine.cor")
 
 The transform side is finished and wired into `Field`, so filling in
 `parse_cor()` is the only remaining work. Meanwhile you can calibrate from
-measured points, which is what the vendor UI does anyway:
+measured points, which is how calibration works anyway:
 
 ```python
 from dbk2jp import Field, GridCorrection, Job, CO2
@@ -385,8 +427,8 @@ with Job(CO2, field=field) as j:
     j.lines_mm([(20, -20), (20, 20), (-20, 20), (-20, -20)])
 ```
 
-`PolyCorrection(cx, cy)` is there too, matching the bivariate-polynomial shape
-`preCalibPoint` implies, for when the coefficients are known.
+`PolyCorrection(cx, cy)` is there too, matching the bivariate-polynomial shape a
+coefficient fit implies, for when the coefficients are known.
 
 ---
 

@@ -2,38 +2,24 @@
 Optical distortion correction from a .cor file. SCAFFOLD, NOT WORKING.
 
 A galvo head does not paint a perfect square: the two mirrors sit at different
-distances from the lens, so the field is barrelled and skewed. Vendors ship a
-per-head correction table in a `.cor` file and apply it on the host, before the
-coordinates ever reach the board. This board is no different -- nothing in the
+distances from the lens, so the field is barrelled and skewed. Machines ship a
+per-head correction table in a `.cor` file, applied on the host before the
+coordinates ever reach the board. This board is no different: nothing in the
 command set takes a correction table, so it has to happen here.
 
 WHAT IS KNOWN
 -------------
-Correction lives in `calib.dll`, shipped alongside the vendor software, which
-exports:
-
-    InitCalib               set up from a file
-    getCalibCoefFromFile    file -> coefficients        (calls loadUcf)
-    getCalibCoefs           recompute coefficients
-    preCalibPoint           transform one point
-    CalibPoint              transform one point, second variant
-    getCalibPnts            read the calibration points back
-    setCalibPnts            write points and re-save     (calls saveUcf)
-
-So a `.cor` is a "UCF" file that yields **coefficients**, not a raw lookup
-grid: `loadUcf` parses it with C++ stream extraction into doubles, meaning the
-file is **text**, and `getCalibCoefs` then fits coefficients that
-`preCalibPoint` evaluates per point. The vendor calibration UI works on a grid
-of measured points (`IDS_CALIB_XV-CALI` / `XV-REAL` pairs, minimum 3x3), which
-is what gets fitted.
+A `.cor` is a **text** file, and it carries a grid of measured calibration
+points that get **fitted to coefficients** rather than being used as a raw
+lookup table. The points come in nominal/actual pairs on a grid of at least
+3x3.
 
 WHAT IS NOT KNOWN
 -----------------
-The token grammar of the file. It could not be recovered from the decompile
-alone, and no `.cor` file was available to check a guess against. So
-`load_cor()` deliberately raises rather than returning a wrong transform: a
-correction that is subtly wrong is worse than none, because the beam still goes
-somewhere plausible.
+The token grammar of the file, and no `.cor` was available to check a guess
+against. So `load_cor()` deliberately raises rather than returning a wrong
+transform: a correction that is subtly wrong is worse than none, because the
+beam still goes somewhere plausible.
 
 USING IT ANYWAY
 ---------------
@@ -66,7 +52,7 @@ class Correction:
 
 
 class PolyCorrection(Correction):
-    """Bivariate polynomial, the shape `getCalibCoefs` / `preCalibPoint` implies.
+    """Bivariate polynomial, the shape a coefficient fit implies.
 
     x' = sum over i,j of cx[i][j] * x**i * y**j, and the same for y'. Identity
     is cx = [[0, 0], [1, 0]], cy = [[0, 1], [0, 0]].
@@ -135,8 +121,8 @@ class GridCorrection(Correction):
         """Build from measured ((nominal_x, nominal_y), (actual_x, actual_y))
         pairs by inverse-distance weighting onto a `size` x `size` grid.
 
-        The vendor UI wants at least 3x3 measured points; this accepts any
-        number and is the practical way to calibrate without a .cor file.
+        Calibration normally wants at least 3x3 measured points; this accepts
+        any number and is the practical way to calibrate without a .cor file.
         """
         if not pairs:
             raise ValueError("no calibration points")
@@ -169,15 +155,14 @@ class GridCorrection(Correction):
 def parse_cor(data):
     """Turn the bytes of a .cor into a Correction. NOT IMPLEMENTED.
 
-    Fill this in when you have a file. What is already established: it is text,
-    parsed by `loadUcf` in calib.dll with C++ stream extraction into doubles,
-    and it carries calibration points that get fitted to coefficients rather
-    than a ready-made lookup table. Return a PolyCorrection or a
+    Fill this in when you have a file. What is already established: it is a
+    text format carrying calibration points that get fitted to coefficients,
+    rather than a ready-made lookup table. Return a PolyCorrection or a
     GridCorrection; everything downstream already works.
     """
     raise NotImplementedError(
-        "the .cor (UCF) text grammar has not been recovered and no sample file "
-        "was available to verify a guess. See dbk2jp/cor.py for what is known. "
+        "the .cor text grammar is not known and no sample file was available "
+        "to verify a guess. See dbk2jp/cor.py for what is established. "
         "Until then, calibrate with GridCorrection.from_points(measured_pairs)."
     )
 
@@ -194,10 +179,9 @@ def load_cor(path):
     kind = "text" if _looks_like_text(data) else "binary"
     raise NotImplementedError(
         "%s: %d bytes, looks like %s. Parsing is not implemented -- see "
-        "dbk2jp/cor.py. calib.dll parses this as text, so a %s file is "
-        "expected; anything else means this board's format differs from the "
-        "one that was reverse engineered."
-        % (path, len(data), kind, "text")
+        "dbk2jp/cor.py. A text file is expected; anything else means this "
+        "machine's format differs from the one described there."
+        % (path, len(data), kind)
     )
 
 

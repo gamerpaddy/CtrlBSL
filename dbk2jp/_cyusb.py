@@ -4,8 +4,7 @@ Windows transport: the stock CYUSB3.sys driver, driven through its IOCTLs.
 Selected automatically by usb.py on win32. Exposes find_devices() and
 Transport, the same pair every backend provides.
 
-IOCTL codes and the SINGLE_TRANSFER layout were extracted from the CyAPI code
-statically linked into SeaMark.dll -- see DBK2JP_PROTOCOL.md.
+IOCTL codes and the SINGLE_TRANSFER layout used by this driver:
 
     0x220024  send non-EP0 transfer   (bulk)
     0x220020  send EP0 control transfer

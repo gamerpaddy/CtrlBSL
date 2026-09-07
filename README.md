@@ -6,7 +6,7 @@ Drive a **BSL/SeaCAD DBK2JP** galvo laser marking controller directly from Pytho
 No proprietary or paid software needed.
 
 On Windows it goes through the board's existing Cypress CYUSB3 driver, so nothing
-has to be replaced or unbound and any vendor software you already have keeps
+has to be replaced or unbound and any other software you already have keeps
 working alongside it. On Linux and macOS it talks plain libusb instead.
 
 Python 3.8+. Drop the `dbk2jp/` folder next to your script.
@@ -47,6 +47,8 @@ python -m dbk2jp status           # unlock state, inputs, free cache
 python -m dbk2jp inputs 5         # live input view with edge timings
 python -m dbk2jp out 1 1          # set OUT1 high
 python -m dbk2jp jump 0x4000 0x8000
+python -m dbk2jp field             # scan field, creates markcfg0 if missing
+python -m dbk2jp field size_mm=110 # adjust and save
 ```
 
 ---
@@ -93,7 +95,7 @@ with Job(MOPA) as j:
 ```
 
 `j.mopa_pulse(value)` sets it immediately instead of at the next job. Both are
-**untested**, read out of the vendor pen-parameter path. There is no MOPA laser
+**untested**. There is no MOPA laser
 here to measure.
 
 ---
@@ -129,21 +131,21 @@ Verified on hardware with a scope.
 | SGIN | laser fault line plus `abort()` and `guard()` |
 | Outputs | OUT0, OUT1 via `0x0111` |
 | Stepper | pulse count, rate, direction, symmetric accel/decel |
-| Millimetre coordinates | field size, offsets, aspect, mirror and swap from `markcfg0` |
+| Millimetre coordinates | field size, offsets, aspect, mirror and swap, read from `markcfg0` or created if there is none |
 | MO / AP / GATE | verified |
 
 ## What is missing
 
 | | |
 |---|---|
-| **FPS** (pin 6) | never moves. Config FPK, a full output-port sweep and the `0x0218` Q-switch branch all tried, and no `FPS` string exists in any vendor DLL. Likely a board-variant pin |
-| **DA1** analog (pin 15) | no voltage. `ENPOWERANALOGOUT=0`, and the vendor software cannot drive it either, so this is machine config rather than protocol |
+| **FPS** (pin 6) | never moves. config FPK values, a full output-port sweep and the `0x0218` Q-switch branch all tried. Likely a board-variant pin |
+| **DA1** analog (pin 15) | no voltage. `ENPOWERANALOGOUT=0`, and no other software drives it on this machine either, so this is machine config rather than protocol |
 | MOPA | pulse width and type code both unverified, no MOPA laser here |
 | UV, green, YAG | type codes unverified |
 | Linux, macOS | backend written, never run |
-| **.cor files** | text "UCF" format handled by `calib.dll` (`getCalibCoefFromFile`, `preCalibPoint`), fitted to coefficients rather than a lookup grid. Grammar not recovered and no sample file to test against, so `load_cor()` raises. Transform side is done: calibrate with `GridCorrection.from_points()` meanwhile |
+| **.cor files** | a text format carrying calibration points fitted to coefficients rather than a lookup grid. The grammar is not known and there was no sample file to test a guess against, so `load_cor()` raises. The transform side is done: calibrate with `GridCorrection.from_points()` meanwhile |
 | Galvo distortion terms | `GALVODISTOR`, `GALVOHORVER`, `GALVOTRAPEDISTOR` are all `1.0` (identity) in the available config, so the conventional model used for them is unverified |
-| **EMSTOP** | sits at 5 V and never moves. Nothing in the command set drives it and the vendor software offers no way to assert it either, so it looks like a pure hardware interlock line rather than something the host can read or control |
+| **EMSTOP** | sits at 5 V and never moves. Nothing in the command set drives it and no software here can assert it, so it looks like a pure hardware interlock line rather than something the host can read or control |
 | SGIN0..2 | OR'd into one bit, so you learn *that* a fault fired, never *which* |
 | SGIN3 | on the connector, in no status field |
 | Job complete | no flag found. `0x0101` byte 2 bit 3 only says the engine was started, and `free_cache()` reads idle even while vectors execute, so neither can be polled for completion |

@@ -23,8 +23,8 @@ The parameters come from the machine's `markcfg0`, section [LMC_CFG]:
         j.begin_mm(start=(-20, -20))
         j.lines_mm([(20, -20), (20, 20), (-20, 20), (-20, -20)])
 
-CAVEAT on the four distortion families. Their *names* and the fact the vendor
-applies them are certain, but the exact formulas were not recovered: in the
+CAVEAT on the four distortion families. Their *names* and the fact they are
+applied are certain, but the exact formulas are not: in the
 markcfg0 available here every one of them is 1.0, i.e. identity, so there was
 nothing to measure against. They are implemented with the conventional galvo
 model and are a no-op at 1.0, which is the value real configs mostly carry.
@@ -32,8 +32,36 @@ Anything else should be checked on a test pattern before you trust it. Field
 size, offset, aspect, mirror and swap are plain arithmetic and are exact.
 """
 
+import os
+
 CENTRE = 0x8000
 FULL = 0xFFFF
+
+# Written when no markcfg0 exists. Deliberately small: only what this library
+# reads, plus the laser defaults a bare machine needs to come up at all.
+DEFAULT_MARKCFG = {
+    "LASERTYPE": "1",
+    "FIELDSIZE": "1.000000e+002",
+    "FIELDOFFSETX": "0.000000e+000",
+    "FIELDOFFSETY": "0.000000e+000",
+    "GALVOX": "0",
+    "GALVODISTOR0": "1.000000e+000",
+    "GALVODISTOR1": "1.000000e+000",
+    "GALVOHORVER0": "1.000000e+000",
+    "GALVOHORVER1": "1.000000e+000",
+    "GALVOTRAPEDISTOR0": "1.000000e+000",
+    "GALVOTRAPEDISTOR1": "1.000000e+000",
+    "GALVOASPECT0": "1.000000e+002",
+    "GALVOASPECT1": "1.000000e+002",
+    "GALVONEGATE0": "0",
+    "GALVONEGATE1": "0",
+    "ENPWMOUT": "1",
+    "MAXPWMFREQ": "20000",
+    "MINPWMFREQ": "1000",
+    "ENPWMTICK": "1",
+    "PWMTICKPERIOD": "5000",
+    "PWMTICKPULSEWIDTH": "1",
+}
 
 
 class Field:
@@ -52,13 +80,37 @@ class Field:
         self.horver = tuple(float(v) for v in horver)
         self.trapezoid = tuple(float(v) for v in trapezoid)
         self.correction = correction        # see cor.py; None means none
+        self.path = None                    # set by load_or_create()/save()
+        self.created = False                # True if save() wrote a new file
 
     # ---- construction ---------------------------------------------------
 
     @classmethod
     def from_markcfg(cls, path, correction=None):
-        """Build from a machine's markcfg0."""
+        """Build from a machine's markcfg0. Raises if the file is missing."""
         return cls.from_dict(read_markcfg(path), correction=correction)
+
+    @classmethod
+    def load_or_create(cls, path="markcfg0", correction=None, **defaults):
+        """Load a markcfg0, writing a default one first if it does not exist.
+
+        Not every machine ships with a config, and a missing file should not
+        stop you from marking. Any keyword accepted by Field seeds the file
+        that gets written:
+
+            Field.load_or_create("markcfg0", size_mm=110.0)
+
+        Returns the Field. Check `field.created` to see whether a file was
+        written, and adjust it with set() / save().
+        """
+        created = False
+        if not os.path.exists(path):
+            cls(**defaults).save(path)
+            created = True
+        field = cls.from_markcfg(path, correction=correction)
+        field.path = path
+        field.created = created
+        return field
 
     @classmethod
     def from_dict(cls, cfg, correction=None):
@@ -172,6 +224,76 @@ class Field:
         y = (cy - CENTRE) / (FULL // 2) / (self.aspect[1] / 100.0) * h
         return x + self.offset_mm[0], y + self.offset_mm[1]
 
+    # ---- adjusting ------------------------------------------------------
+
+    def set(self, **kw):
+        """Change factors in place, with validation.
+
+            field.set(size_mm=110.0, aspect=(100.0, 99.4), negate=(True, False))
+
+        Accepts size_mm, offset_mm, aspect, negate, swap_xy, distor, horver,
+        trapezoid. Returns self so it chains into save().
+        """
+        pairs = ("offset_mm", "aspect", "negate", "distor", "horver", "trapezoid")
+        for key, value in kw.items():
+            if not hasattr(self, key) or key in ("correction", "path", "created"):
+                raise ValueError("unknown field factor %r" % key)
+            if key in pairs:
+                try:
+                    a, b = value
+                except (TypeError, ValueError):
+                    raise ValueError("%s takes a pair, got %r" % (key, value))
+                value = (bool(a), bool(b)) if key == "negate" else (float(a), float(b))
+            elif key == "swap_xy":
+                value = bool(value)
+            else:
+                value = float(value)
+            setattr(self, key, value)
+
+        if self.size_mm <= 0:
+            raise ValueError("size_mm must be positive, got %g" % self.size_mm)
+        if 0 in self.aspect:
+            raise ValueError("aspect of 0%% collapses the axis")
+        return self
+
+    def save(self, path=None):
+        """Write these factors to a markcfg0, creating or updating it.
+
+        An existing file keeps every key it already has, including the ones
+        this library does not touch: only the field factors are rewritten. A
+        new file gets a minimal but complete [LMC_CFG] section.
+        """
+        path = path or self.path or "markcfg0"
+        cfg = read_markcfg(path) if os.path.exists(path) else dict(DEFAULT_MARKCFG)
+        cfg.update(self.as_markcfg())
+        write_markcfg(path, cfg)
+        self.path = path
+        return path
+
+    def as_markcfg(self):
+        """These factors as markcfg0 key/value strings."""
+        def e(v):
+            # three-digit exponent, matching the format these files use
+            text = "%.6e" % float(v)
+            mant, _, exp = text.partition("e")
+            return "%se%s%03d" % (mant, exp[0], abs(int(exp)))
+        return {
+            "FIELDSIZE": e(self.size_mm),
+            "FIELDOFFSETX": e(self.offset_mm[0]),
+            "FIELDOFFSETY": e(self.offset_mm[1]),
+            "GALVOASPECT0": e(self.aspect[0]),
+            "GALVOASPECT1": e(self.aspect[1]),
+            "GALVONEGATE0": "1" if self.negate[0] else "0",
+            "GALVONEGATE1": "1" if self.negate[1] else "0",
+            "GALVOX": "1" if self.swap_xy else "0",
+            "GALVODISTOR0": e(self.distor[0]),
+            "GALVODISTOR1": e(self.distor[1]),
+            "GALVOHORVER0": e(self.horver[0]),
+            "GALVOHORVER1": e(self.horver[1]),
+            "GALVOTRAPEDISTOR0": e(self.trapezoid[0]),
+            "GALVOTRAPEDISTOR1": e(self.trapezoid[1]),
+        }
+
     def __repr__(self):
         return ("<Field %g mm, offset (%g, %g), aspect (%g%%, %g%%)%s%s%s>"
                 % (self.size_mm, self.offset_mm[0], self.offset_mm[1],
@@ -197,3 +319,18 @@ def read_markcfg(path):
             if sep:
                 cfg[key.strip()] = value.strip()
     return cfg
+
+
+def write_markcfg(path, cfg, section="LMC_CFG"):
+    """Write a flat dict back out as a markcfg0.
+
+    Key order follows DEFAULT_MARKCFG so a generated file reads like a real
+    one, then anything else in alphabetical order.
+    """
+    order = [k for k in DEFAULT_MARKCFG if k in cfg]
+    order += sorted(k for k in cfg if k not in DEFAULT_MARKCFG)
+    lines = ["[" + section + "]"]
+    lines += ["%s=%s" % (key, cfg[key]) for key in order]
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return path

@@ -6,6 +6,14 @@
     inputs [secs]      live input/SGIN view, edge timings on exit
     out <port> <0|1>   set an output port
     jump <x> <y>       move the galvos (hex or decimal)
+
+    field [path] [key=value ...]
+                       show the scan field, creating a default markcfg0 if
+                       none exists. Any key=value adjusts and saves it:
+
+                         python -m dbk2jp field
+                         python -m dbk2jp field markcfg0 size_mm=110
+                         python -m dbk2jp field aspect=100,99.4 negate=1,0
 """
 
 import sys
@@ -15,6 +23,7 @@ from . import protocol as S
 from .usb import Board, find_devices
 from .unlock import unlock, encrypt_state, SETS
 from .job import Job
+from .field import Field
 
 
 def _inputs(secs):
@@ -66,6 +75,40 @@ def main(argv):
             ok = unlock(b, SETS[name])
             print("UNLOCKED / LED green" if ok else "still locked")
         return 0 if ok else 1
+
+    if what == "field":
+        path, sets = "markcfg0", {}
+        for arg in args:
+            if "=" in arg:
+                key, _, value = arg.partition("=")
+                sets[key.strip()] = value.strip()
+            else:
+                path = arg
+        field = Field.load_or_create(path)
+        if field.created:
+            print("no %s found, wrote a default one" % path)
+        if sets:
+            parsed = {}
+            for key, value in sets.items():
+                if "," in value:
+                    a, b = value.split(",", 1)
+                    parsed[key] = (float(a), float(b))
+                elif key == "swap_xy":
+                    parsed[key] = value not in ("0", "false", "False")
+                else:
+                    parsed[key] = float(value)
+            field.set(**parsed).save(path)
+            print("saved", path)
+        print(field)
+        print("  size      %g mm  (%.4f mm per count)" % (field.size_mm, field.mm_per_count))
+        print("  offset    %g, %g mm" % field.offset_mm)
+        print("  aspect    %g%%, %g%%" % field.aspect)
+        print("  negate    %s, %s     swap_xy %s"
+              % (field.negate[0], field.negate[1], field.swap_xy))
+        print("  distor    %g, %g" % field.distor)
+        print("  horver    %g, %g" % field.horver)
+        print("  trapezoid %g, %g" % field.trapezoid)
+        return 0
 
     if what == "status":
         with Job(unlock_now=False) as j:
