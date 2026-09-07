@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# not API: reverse-engineering notes, vendor binaries, captures, superseded code
+DBK2JP_PROTOCOL.md
+bslapp files/
+unused/

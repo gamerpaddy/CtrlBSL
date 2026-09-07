@@ -1,0 +1,494 @@
+"""
+High-level job API for the BSL/SeaCAD DBK2JP board.
+
+Everything here is verified on hardware -- see DBK2JP_PROTOCOL.md.
+
+THE RULE THAT MATTERS: session/control commands go on EP 0x06; everything that
+configures a job goes inline in the EP 0x02 batch ahead of the vectors. The
+board ACKs parameter commands on EP 0x06 and then silently ignores them.
+
+    from dbk2jp import Job
+    with Job() as j:
+        j.laser(freq_khz=20, power_pct=50)
+        j.pwm_burst(seconds=10)          # continuous PWM for scope work
+"""
+
+import time
+
+from . import protocol as S
+from .usb import Board
+from .unlock import unlock, encrypt_state
+
+# CO2=0x22, fiber=0x11, UV=0x33, green=0x44, MOPA=0x55 (high byte of 0x0211 Param0)
+LASER_CO2, LASER_FIBER, LASER_UV, LASER_GREEN, LASER_MOPA = 0x22, 0x11, 0x33, 0x44, 0x55
+
+SEG_TIME = 0.00083          # measured cost of one lit segment, seconds
+MAX_SEGS = 1400             # per EP 0x02 transfer (flush limit is 1920)
+CENTRE = 0x8000
+
+
+class Job:
+    def __init__(self, laser=LASER_CO2, board=None, index=0, unlock_now=True):
+        self.b = board if board is not None else Board(index=index)
+        self.laser_type = laser
+        self._freq = 20
+        self._power = 50
+        self._tickle = False
+        if unlock_now:
+            self.ensure_unlocked()
+
+    # ---- plumbing -------------------------------------------------------
+    def _cmd(self, c, t=1200, retries=3):
+        """Send on EP 0x06 and return the matching reply (see Board.ask)."""
+        return self.b.ask(c, timeout_ms=t, retries=retries)
+
+    def status(self):
+        return self._cmd(S.cmd(0x0101))
+
+    def unlocked(self):
+        """True once the board is authenticated (加密 LED green).
+
+        Read from 0x0102 GetEncryptState byte 7, NOT 0x0101 bit 5 -- that bit is
+        a ready/arm flag that the reset tail sets with the LED still red.
+        """
+        st = self._cmd(S.cmd(0x0102))
+        return bool(st and st[7] == 2)
+
+    # ---- inputs ---------------------------------------------------------
+
+    IN_SHIFT = 8            # input bits start at bit 8 of the status word
+    IN_MASK  = 0xFF00       # bits 8..15 are not part of the cache count
+    REMARK_BIT = 0x0800     # bit 11: mark-repeat trigger (there is no IN3)
+
+    def status_word(self):
+        """The 16-bit word at bytes 5..6 of the 0x0101 reply.
+
+        Low bits are the free-cache count; the high bits carry the opto inputs.
+        """
+        st = self.status()
+        return ((st[5] << 8) | st[6]) if st else None
+
+    def inputs(self):
+        """Raw input bits, IN0 in bit 0. A bit reads 1 when the pin is idle.
+
+        IN0 doubles as the X axis origin/home switch on some machine setups.
+        """
+        w = self.status_word()
+        return None if w is None else (w & self.IN_MASK) >> self.IN_SHIFT
+
+    def input_pin(self, n):
+        """State of INn (0-based, matching the connector labels).
+
+        True = idle/high, False = driven.
+        """
+        v = self.inputs()
+        return None if v is None else bool(v >> n & 1)
+
+    def remark(self):
+        """REMARK trigger input, bit 11. True = idle/high, False = driven."""
+        w = self.status_word()
+        return None if w is None else bool(w & self.REMARK_BIT)
+
+    # ---- outputs --------------------------------------------------------
+
+    def out(self, port, value):
+        """Set output port `port` to `value`. Verified on OUT0 and OUT1.
+
+        OUT2 and OUT3 are the stepper DIR and PULSE pins -- driven by axis_move()
+        via 0x0230-0x0233. Do not write them here while an axis move runs.
+
+        0x0111 takes the port index in the HIGH BYTE of Param0 and the level in
+        Param1 -- not a bitmask in Param0, which is why writing 0x0001 there
+        does nothing. Goes on EP 0x06 (SetPortOutput uses the +0x80 immediate
+        path, not the EP 0x02 batch).
+        """
+        return self._cmd(S.cmd(0x0111, (port & 0xFF) << 8, value & 0xFFFF))
+
+    def out_pulse(self, port, value, ms):
+        """Timed output pulse via 0x2F82. UNTESTED -- packing read off
+        SetPortOutput's duration>=0 branch, which routes to EP 0x02."""
+        ticks = int(ms) * 2000
+        blob = S.cmd(0x2F82,
+                     ((port & 0xFF) << 8) | (1 if ms > 0 else 0),
+                     ((value & 0xFF) << 8) | ((ticks >> 24) & 0xFF),
+                     ((ticks >> 8) & 0xFF) | (((ticks >> 16) & 0xFF) << 8),
+                     (int(ms) * -0x3000) & 0xFFFF, 0)
+        self.b.write_data(blob)
+
+    def out_state(self):
+        """0x0112 GetOutPortState."""
+        return self._cmd(S.cmd(0x0112))
+
+    def armed(self):
+        """0x0101 bit 5: board reset and online. Independent of the unlock."""
+        st = self.status()
+        return bool(st and st[2] & 0x20)
+
+    def ensure_unlocked(self):
+        self._cmd(S.cmd(0x0105))
+        self._cmd(S.cmd(0x0106))
+        self._cmd(S.cmd(0x0105))
+        if not self.unlocked():
+            unlock(self.b, verbose=False)      # 3-frame ATSHA204 replay
+        return self.unlocked()
+
+    # ---- configuration --------------------------------------------------
+    def laser(self, freq_khz=20, power_pct=50, tickle=False):
+        """Store laser settings. They are emitted into each job's EP 0x02 header."""
+        self._freq, self._power, self._tickle = freq_khz, power_pct, tickle
+        period = int(round(48000.0 / freq_khz))
+        return 48e6 / (period + 1)          # actual output frequency (N+1 counter)
+
+    def tick(self, freq_khz=5.0, width_us=2.0, enable=True):
+        """CO2 pre-ionisation tickle -- its own period/width, independent of the
+        marking PWM set by laser(). 0x0217: Param0 = flags<<8 (bit0 ENPWMTICK,
+        bit1 ENCO2FPK), Param1 = period in 48 MHz ticks, Param2 = width in ticks."""
+        self._tickle = enable
+        self._tick_khz = freq_khz
+        self._tick_us = width_us
+        period = int(round(48000.0 / freq_khz))
+        return 48e6 / (period + 1), int(round(width_us * 48))
+
+    def _header(self):
+        pwr, period, width = S.set_power_0210(self._freq, self._power)
+        tk = getattr(self, "_tick_khz", self._freq)
+        tus = getattr(self, "_tick_us", 1.0)
+        tperiod = int(round(48000.0 / tk))
+        twidth = int(round(tus * 48))
+        h = S.cmd(0x0211, (self.laser_type << 8), 0, 0, 0, 0)
+        h += pwr
+        h += S.cmd(0x0217, 0x0100 if self._tickle else 0x0000,
+                   tperiod & 0xFFFF, twidth & 0xFFFF, 0, 0)
+        h += S.cmd(0x0208, 0, 0, 0, 0, 0)
+        return h
+
+    # ---- execution ------------------------------------------------------
+    def begin(self, start=(0x4000, CENTRE), speed=200):
+        """Reset, arm, and push the parameter header + opening jump."""
+        self._cmd(S.cmd(0x0106))
+        self._cmd(S.cmd(0x0105))
+        self._cmd(S.cmd(0x0104))
+        blob = self._header() + S.cmd(0x0241, speed, start[0], start[1], 0, 500)
+        self.b.write_data(blob)
+
+    def lines(self, points, speed=200):
+        """Emit lit (laser-on) vectors through `points`, paced to the board."""
+        for i in range(0, len(points), MAX_SEGS):
+            chunk = points[i:i + MAX_SEGS]
+            blob = b"".join(S.cmd(0x0243, speed, x, y, 0, 500) for x, y in chunk)
+            self.b.write_data(blob)
+            time.sleep(len(chunk) * SEG_TIME * 0.92)
+
+    def jump(self, x, y, speed=0x2710, delay=0x01F4):
+        """Unlit move to (x, y). 0x8000 is centre, full span 0x0000..0xFFFF.
+
+        Verified on both galvo pins: alternating 0x4000/0xC000 at 1 Hz on X
+        or Y moves the corresponding mirror. Goes on EP 0x02 like every other geometry command.
+        """
+        self.b.write_data(S.cmd(0x0241, speed, x & 0xFFFF, y & 0xFFFF, 0, delay))
+
+    def free_cache(self):
+        """Free queue slots, from bytes 5-6 of the 0x0101 reply.
+
+        Bits 8..15 of that word are the opto inputs, not part of the count, so
+        they are masked off here. Reading the raw 16-bit word (as this did
+        before) makes the result jump by 256 per input whenever one changes.
+        The count is the low byte only -- a 256-slot queue.
+        """
+        st = self.status()
+        return (((st[5] << 8) | st[6]) & ~self.IN_MASK & 0xFFFF) if st else 0
+
+    def pwm_burst(self, seconds=10, speed=200, span=(0x4000, 0xC000), margin=48):
+        """Sustained laser PWM for scope work.
+
+        Closed-loop paced off the board's own free-cache counter rather than a
+        fixed sleep: open-loop pacing drains the queue between chunks and the
+        output visibly drops back to tickle-only about once a second. Keeping the
+        queue topped up (never closer than `margin` slots to full) gives
+        continuous output without the overrun that silently clears the unlock bit.
+
+        `margin` was 512 back when free_cache() returned the raw 16-bit word
+        (~4029 idle). Now that the input bits are masked off the counter reads
+        ~189 idle out of 256, so the margin scales down with it.
+        """
+        self.begin(start=(span[0], CENTRE), speed=speed)
+        t0 = time.time()
+        n = 0
+        while time.time() - t0 < seconds:
+            free = self.free_cache()
+            want = min(MAX_SEGS, max(0, free - margin))
+            if want < 64:                      # queue is full enough; let it drain
+                time.sleep(0.01)
+                continue
+            pts = [((span[1] if i % 2 == 0 else span[0]), CENTRE) for i in range(want)]
+            blob = b"".join(S.cmd(0x0243, speed, x, y, 0, 500) for x, y in pts)
+            try:
+                self.b.write_data(blob)
+                n += want
+            except Exception as e:
+                print("stalled:", repr(e))
+                break
+        return n
+
+    def power_byte(self, value, freq_khz=None):
+        """Fiber parallel power word P0..P7 (0x0210 Param3 low byte).
+
+        Static and latched -- no marking run needed -- and the board strobes
+        PLATCH on every change so the laser clocks the new word.
+
+        Use this rather than laser(power_pct=...) for bit-level work: the
+        percentage path quantises as (pct*255)//100, so values like 0x80 are
+        unreachable through it.
+        """
+        f = freq_khz if freq_khz is not None else self._freq
+        self._cmd(S.cmd(0x0106))
+        self._cmd(S.cmd(0x0105))
+        self._cmd(S.cmd(0x0104))
+        blob = S.cmd(0x0211, (self.laser_type << 8), 0, 0, 0, 0)
+        blob += S.set_power_raw(f, value & 0xFF)
+        blob += S.cmd(0x0208, 0, 0, 0, 0, 0)
+        self.b.write_data(blob)
+        return value & 0xFF
+
+    def dac(self, value12, mark=False):
+        """Analog power out, 0x0207 Param0 = 12-bit word (CON3 pin 15 / DA1).
+
+        NOT CONFIRMED WORKING -- produced no voltage on this board under every
+        condition tried (idle, while marking, and with the word placed in each
+        of Param0..Param4). Kept because the encoding is correct per
+        CCmdExecutor::SendPenPara; the gate is believed to be a board-side
+        analog enable that no decompiled command writes. See DBK2JP_PROTOCOL.md.
+        """
+        self._cmd(S.cmd(0x0106))
+        self._cmd(S.cmd(0x0105))
+        self._cmd(S.cmd(0x0104))
+        blob = S.cmd(0x0211, (self.laser_type << 8), 0, 0, 0, 0)
+        blob += S.set_power_raw(self._freq, 0x80)
+        blob += S.cmd(0x0207, value12 & 0x0FFF, 0, 0, 0, 0)
+        blob += S.cmd(0x0208, 0, 0, 0, 0, 0)
+        if mark:
+            blob += S.cmd(0x0241, 200, 0x4000, CENTRE, 0, 500)
+        self.b.write_data(blob)
+        return value12 & 0x0FFF
+
+    def mo(self, on=True):
+        """Master oscillator command pair (CON3 pin 18).
+
+            0x0281 = MO on, 0x0280 = MO off
+
+        CCmdExecutor::SetMoDelay @ 1006d8d0 builds the ID as htons(param_1 + 0x280),
+        so the bool literally is the opcode -- which is why a scan for literal
+        htons() constants missed this pair entirely.
+
+        NO OBSERVABLE EFFECT on pin 18: the marking engine asserts MO by itself,
+        and pin 18 tracks engine activity (red-light preview counts) rather than
+        lasing. Sending 0x0281 while idle does not raise it. Provided for
+        completeness; to hold MO high, keep vectors streaming.
+        """
+        self._cmd(S.cmd(0x0106))
+        self._cmd(S.cmd(0x0105))
+        self._cmd(S.cmd(0x0104))
+        blob = S.cmd(0x0211, (self.laser_type << 8), 0, 0, 0, 0)
+        blob += S.set_power_raw(self._freq, 0x80)
+        blob += S.cmd(0x0281 if on else 0x0280, 0, 0, 0, 0, 0)
+        blob += S.cmd(0x0208, 0, 0, 0, 0, 0)
+        self.b.write_data(blob)
+        return on
+
+    # 0x0230 Param4 flag bits, decoded from SetAxis_0230 against tagAxisPar offsets
+    AX_REVROT    = 0x100     # +0x06 REVROT  -> DIR pin (verified on scope)
+    AX_FLAG_200  = 0x200     # field@0x82 != 1
+    AX_ZEROTYPE  = 0x004     # +0x34 nZeroType
+    AX_MOMODE    = 0x001     # +0x48 nMoMode
+    AX_FLAG_008  = 0x008     # field@0xb0
+    AX_FLAG_002  = 0x002     # field@0xc4
+
+    def axis_move(self, pulses, pps, direction=0, flags=0,
+                  min_pps=None, acctime=100, p232=175):
+        """Stepper axis move -> PULSE / DIR pins.
+
+        Uses the newer FPGA path (0x0230/0x0232/0x0231/0x0233); the legacy
+        0x2D80/0x2D81 pair is dead on this board. 0x0233 with all-zero params is
+        the execute trigger, and each trigger runs ONE finite move.
+
+            0x0230  Param0/1 = 32-bit pulse count, hi/lo
+                    Param4   = flag word; bit 0x100 (REVROT) drives DIR
+            0x0231  Param0/1 = speed pair; effective rate = max(Param0, Param1)
+            0x0233  GO
+
+        Speed is pulses-per-second directly (2000 -> 2 kHz, measured), and the
+        move self-terminates after `pulses`, so duration = pulses/pps.
+
+        DIRECTION IS 0x0230 Param4 BIT 0x100, NOT 0x0232. Driving 0x0232 Param0
+        between 0 and 1 changes nothing on DIR -- verified.
+
+        ACCELERATION: 0x0231 Param2's HIGH byte is the ramp time. Taken from a
+        LightBurn rotary jog capture, which sent Param2 = 0x6400 -- high byte
+        100, matching AXISACCTIME=100 in markcfg0. Verified: ACCTIME 255 gives a
+        long visible ramp, 20 a much shorter one. Leave it non-zero or the move
+        starts and stops abruptly.
+
+        0x0232 Param0 = 175 in every captured jog; purpose unknown but sent for
+        fidelity with the vendor sequence.
+
+        Let the move finish rather than cutting it short with a reset, otherwise
+        the deceleration ramp never happens.
+        """
+        self._cmd(S.cmd(0x0106))
+        self._cmd(S.cmd(0x0105))
+        self._cmd(S.cmd(0x0104))
+        head = S.cmd(0x0211, (self.laser_type << 8), 0, 0, 0, 0)
+        head += S.set_power_raw(self._freq, 0x80)
+        head += S.cmd(0x0208, 0, 0, 0, 0, 0)
+        self.b.write_data(head)
+        mn = min_pps if min_pps is not None else pps
+        p4 = (flags | (self.AX_REVROT if direction else 0)) & 0xFFFF
+        blob = S.cmd(0x0230, (pulses >> 16) & 0xFFFF, pulses & 0xFFFF, 0, 0, p4)
+        blob += S.cmd(0x0231, mn & 0xFFFF, pps & 0xFFFF,
+                      (acctime & 0xFF) << 8, 0, 0)
+        blob += S.cmd(0x0232, p232 & 0xFFFF, 0, 0, 0, 0)
+        blob += S.cmd(0x0233, 0, 0, 0, 0, 0)
+        self.b.write_data(blob)
+        return pulses / float(pps) if pps else 0.0      # expected duration, seconds
+
+    def laser_port_switch(self, p1=0, p2=0, p3=0, p4=0, p5=0, p6=0):
+        """0x2F84 SetLaserPortSwitch, from CCmdExecutor::SetLaserPortSwitch @ 1006d1c0:
+            Param0 = p1*0x100 + p4
+            Param1 = p5*0x300
+            Param2 = p3*2
+            Param3 = p6*2
+        Purpose not established; a candidate for routing/enabling analog out."""
+        self._cmd(S.cmd(0x0106))
+        self._cmd(S.cmd(0x0105))
+        self._cmd(S.cmd(0x0104))
+        blob = S.cmd(0x2F84, (p1 * 0x100 + p4) & 0xFFFF, (p5 * 0x300) & 0xFFFF,
+                     (p3 * 2) & 0xFFFF, (p6 * 2) & 0xFFFF, 0)
+        self.b.write_data(blob)
+
+    def red_light(self, on=True):
+        """Pilot / red pointer (CON3 pin 22).
+
+        Not a GPIO: 0x0112 never changes. The pointer is driven by the marking
+        engine's red-light mode, selected by the LOW byte of 0x0211 Param0 --
+        0x22 = red light, 0x00 = normal marking. The high byte stays the laser
+        type. So for CO2, Param0 = 0x2222 on, 0x2200 off.
+
+        Derived from CCmdExecutor::SetRedLightMark @ 1006c7d0, which is just
+        SendLenPara(lmc, p2, p3) + flush, with p3 as the red-light flag.
+
+        It latches: once the header is sent the pointer stays on with nothing
+        streaming, so this is a static on/off, not a per-job mode. Like every
+        other parameter it must travel the EP 0x02 batch path.
+        """
+        self._cmd(S.cmd(0x0106))
+        self._cmd(S.cmd(0x0105))
+        self._cmd(S.cmd(0x0104))
+        p0 = (self.laser_type << 8) | (0x22 if on else 0x00)
+        pwr, _, _ = S.set_power_0210(self._freq, self._power)
+        blob = S.cmd(0x0211, p0, 0, 0, 0, 0) + pwr
+        blob += S.cmd(0x0217, 0x0100 if self._tickle else 0x0000,
+                      int(round(48000.0 / getattr(self, "_tick_khz", 5.0))) & 0xFFFF,
+                      int(round(getattr(self, "_tick_us", 1.0) * 48)) & 0xFFFF, 0, 0)
+        blob += S.cmd(0x0208, 0, 0, 0, 0, 0)
+        self.b.write_data(blob)
+        return on
+
+    def tick_off(self):
+        """Stop the tickle generator.
+
+        It is free-running: it keeps pulsing after a job ends and after the host
+        process exits, so it must be switched off explicitly. 0x0217 with
+        Param0 = 0 (ENPWMTICK clear) has to travel the EP 0x02 batch path like
+        any other parameter -- sending it on EP 0x06 is ACKed and ignored.
+        """
+        self._tickle = False
+        self._cmd(S.cmd(0x0106))
+        self._cmd(S.cmd(0x0105))
+        self._cmd(S.cmd(0x0104))
+        tk = getattr(self, "_tick_khz", 5.0)
+        tus = getattr(self, "_tick_us", 1.0)
+        blob = S.cmd(0x0217, 0x0000, int(round(48000.0 / tk)) & 0xFFFF,
+                     int(round(tus * 48)) & 0xFFFF, 0, 0)
+        blob += S.cmd(0x0241, 200, 0x4000, CENTRE, 0, 500)
+        self.b.write_data(blob)
+        time.sleep(0.05)
+        self._cmd(S.cmd(0x0105))
+
+    def stop(self):
+        self._cmd(S.cmd(0x0105))
+
+    # ---- laser status / safety ------------------------------------------
+
+    SGIN_BIT = 0x02          # byte 2 of the 0x0101 reply
+
+    def sgin(self):
+        """Laser status input (SGIN). True = OK, False = fault asserted.
+
+        SGIN0, SGIN1 and SGIN2 all drive the SAME bit -- byte 2 bit 1 -- so the
+        board reports only "some SGIN is asserted", not which. SGIN3 does not
+        appear in the status reply at all. Verified by moving a 500 ms square
+        wave to each pin in turn.
+
+        Which physical fault each SGIN carries (overheat, back-reflection,
+        ready, ...) depends on the laser model; the board does not distinguish
+        them, so treat any assertion as a stop condition.
+        """
+        st = self.status()
+        return None if st is None else bool(st[2] & self.SGIN_BIT)
+
+    def abort(self):
+        """Stop marking and kill laser output now.
+
+        Order matters: cut the laser gate first, then drop the queued vectors,
+        then reset. Returns once the board has acknowledged the reset.
+        """
+        try:
+            self._cmd(S.cmd(0x0208))          # laser off / gate closed
+        except Exception:
+            pass
+        for op in (S.CMD_CLEAR_CACHE, S.CMD_RESET, S.CMD_RUN, S.CMD_RESET):
+            try:
+                self._cmd(S.cmd(op))
+            except Exception:
+                pass
+        self._tickle = False
+
+    def guard(self, seconds, poll=0.005, on_fault=None):
+        """Poll SGIN for `seconds`, calling abort() the moment it asserts.
+
+        Returns True if it ran clean, False if a fault stopped it.
+
+        NOT a substitute for a hardware interlock. This is a USB poll: each
+        round trip costs ~4-8 ms, so worst-case reaction is tens of ms, and it
+        stops if the host stalls. Real E-stop belongs in hardware.
+        """
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            if self.sgin() is False:
+                self.abort()
+                if on_fault:
+                    on_fault(time.time() - t0)
+                return False
+            time.sleep(poll)
+        return True
+
+    def close(self, quiet=None):
+        """Leaves the board idle and silent: tickle off, then reset.
+
+        `quiet` defaults to "only if this job actually started the tickle" --
+        the generator is free-running, so a job that enabled it must switch it
+        off, but a read-only session should not write to the board on the way
+        out.
+        """
+        try:
+            if self._tickle if quiet is None else quiet:
+                self.tick_off()
+            self.stop()
+        finally:
+            self.b.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
