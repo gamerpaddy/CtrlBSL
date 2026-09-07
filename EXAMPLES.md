@@ -237,7 +237,7 @@ material:
 with Job(FIBER) as j:
     j.configure(freq_khz=30, power_byte=0x78, mo=True)
     for i, ns in enumerate([50, 100, 150, 200, 250, 350]):
-        j.mopa_pulse(ns)
+        j.configure(mopa_pulse=ns)     # goes out with the next job header
         y = 0x4000 + i * 0x1800
         j.begin(start=(0x4000, y), speed=400)
         j.lines([(0xC000, y)], speed=400)

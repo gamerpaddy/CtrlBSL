@@ -1,7 +1,8 @@
 """
 High-level job API for the BSL/SeaCAD DBK2JP board.
 
-Everything here is verified on hardware -- see DBK2JP_PROTOCOL.md.
+Verified on hardware unless a docstring says otherwise -- see
+DBK2JP_PROTOCOL.md for what was measured and how.
 
 THE RULE THAT MATTERS: session/control commands go on EP 0x06; everything that
 configures a job goes inline in the EP 0x02 batch ahead of the vectors. The
@@ -9,7 +10,7 @@ board ACKs parameter commands on EP 0x06 and then silently ignores them.
 
     from dbk2jp import Job
     with Job() as j:
-        j.laser(freq_khz=20, power_pct=50)
+        j.configure(freq_khz=20, power_pct=50)
         j.pwm_burst(seconds=10)          # continuous PWM for scope work
 """
 
@@ -95,9 +96,13 @@ class Job:
             self._power_byte = power_byte & 0xFF
             self._power = round(self._power_byte * 100.0 / 0xFF)
         if mopa_pulse is not None:
-            if not self.laser.mopa_pulse:
-                raise ValueError("%s has no pulse-width setting" % self.laser.name)
-            self._mopa_pulse = mopa_pulse
+            # Gated on the power style, not the type name: a MOPA source has
+            # to be driven under the fiber code here, since 0x55 mutes every
+            # output, so fiber must accept a pulse width too.
+            if self.laser.power != "byte":
+                raise ValueError("%s has no pulse-width setting: it is not a "
+                                 "parallel-power laser" % self.laser.name)
+            self._mopa_pulse = int(mopa_pulse)
         if mo is not None:
             self._mo = bool(mo)
         if tick_khz is not None or tick_us is not None:
@@ -251,6 +256,9 @@ class Job:
         The power byte must have bits 1 and 2 clear or consecutive frames
         corrupt. See _check_spi_clash.
         """
+        if self.laser.power != "byte":
+            raise ValueError("%s has no pulse-width setting: it is not a "
+                             "parallel-power laser" % self.laser.name)
         self._mopa_pulse = int(ns)
         self._live = True
         self._check_spi_clash()

@@ -80,7 +80,8 @@ with Job(FIBER) as j:
 | `YAG` | `0x00` | PWM duty | code is a guess, never confirmed |
 
 `configure()` rejects a frequency outside the type's range, a tickle on a laser
-that has none, and a pulse width on a laser that takes none.
+that has none, and a pulse width on a laser that is not parallel-power, so
+`FIBER` and `MOPA` both accept one.
 
 ### MOPA pulse width
 
@@ -171,6 +172,7 @@ Verified on hardware with a scope.
 | SGIN3 | on the connector, in no status field |
 | Job complete | no flag found. `0x0101` byte 2 bit 3 only says the engine was started, and `free_cache()` reads idle even while vectors execute, so neither can be polled for completion |
 | Untested | `out_pulse()` (`0x2F82`), `laser_port_switch()` (`0x2F84`) |
+| `0x0211` Param2 | documented as an MO delay, but sweeping it 0, 1000 and 20000 moved nothing measurable |
 | Unknown | `0x0232` Param0 = 175, opcode `0x1667`, `0x0211` Param3 and Param4 |
 
 ---

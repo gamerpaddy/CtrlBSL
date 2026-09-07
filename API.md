@@ -30,7 +30,7 @@ Nothing is installed - put the `dbk2jp/` folder next to your script.
 from dbk2jp import Job
 
 with Job() as j:                    # opens, unlocks, leaves the board armed
-    j.laser(freq_khz=20, power_pct=50)
+    j.configure(freq_khz=20, power_pct=50)
     j.jump(0x4000, 0x8000)
     j.pwm_burst(seconds=5)
 ```
@@ -177,20 +177,22 @@ j.settings()                                 # what will go on the wire
 | Type | Code | Power | Tickle | Pulse width | Verified |
 |---|---|---|---|---|---|
 | `CO2` | `0x22` | PWM duty | yes, on by default | no | yes |
-| `FIBER` | `0x11` | byte on P0-P7 | no | no | yes |
+| `FIBER` | `0x11` | byte on P0-P7 | no | yes | yes |
 | `UV` | `0x33` | PWM duty | no | no | no |
 | `GREEN` | `0x44` | PWM duty | no | no | no |
-| `MOPA` | `0x55` | byte on P0-P7 | no | yes | no |
+| `MOPA` | `0x55` | byte on P0-P7 | no | yes | no, **0x55 mutes every output on the board tested, use `FIBER`** |
 | `YAG` | `0x00` | PWM duty | no | no | no, code is a guess |
 
 The code is the high byte of `0x0211` Param0. `LASERS` holds the table;
 `Laser` is the record type if you want to define your own.
 
-`configure(freq_khz, power_pct, power_byte, mopa_pulse, tickle, tick_khz, tick_us)` stores the
+`configure(freq_khz, power_pct, power_byte, mopa_pulse, tickle, tick_khz,
+tick_us, mo)` stores the
 settings and emits nothing: they go into each job's EP 0x02 header. Pass
 `power_pct` or `power_byte`, whichever suits the laser, and the other is
 derived. It raises on a frequency outside the type's range, a tickle on a laser
-without one, and a pulse width on a laser that takes none.
+without one, and a pulse width on a laser that is not parallel-power (so `FIBER`
+and `MOPA` accept one, the PWM types do not).
 
 The tickle has its own frequency and width, set with `tick_khz` / `tick_us` or
 `tick()`. Range is 0.74 to 100 kHz and the width must be shorter than the
@@ -198,9 +200,9 @@ period; both are checked.
 
 ### MOPA pulse width
 
-`0x0206`, `Param0 = 0xA501`, `Param1 = pulse`, on EP 0x02. Set it through
-`configure(mopa_pulse=...)` for the next job, or `mopa_pulse(value)` to send it
-now. **Untested** - no MOPA laser here.
+In nanoseconds, as an SPI frame on P1 and P2. Set it with
+`configure(mopa_pulse=...)` for the next job, or `mopa_pulse(ns)` to send it
+now. Full details below under [MOPA pulse width](#mopa-pulse-width-1).
 
 ### Millimetres
 
