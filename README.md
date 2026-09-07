@@ -3,7 +3,7 @@
 **⚠️ Work in progress.** Verified on one DBK2JP board. Expect gaps and rough edges.
 
 Drive a **BSL/SeaCAD DBK2JP** galvo laser marking controller directly from Python —
-no BslApp, SeaCAD or LightBurn. Talks to the stock Cypress **CYUSB3** driver over
+no proprietary or paid software needed. Talks to the stock Cypress **CYUSB3** driver over
 its IOCTLs, so the vendor software keeps working alongside it.
 
 Windows, Python 3.8+, no dependencies (`ctypes` + `winreg` only). Drop the
