@@ -343,6 +343,17 @@ Most likely a board-variant pin this firmware never drives.
 **BslApp fails to drive it too**, so this is a machine-config issue, not a
 protocol gap.
 
+### EMSTOP - not readable or drivable
+
+The pin sits at 5 V and never changed across any test. No command in the set
+moves it, it appears in no status field, and the vendor software exposes no way
+to assert it. It behaves as a hardware interlock line that the host is simply
+not part of.
+
+This matters for safety design: you cannot read emergency-stop state over USB,
+so an E-stop has to break the circuit in hardware. See the note on `guard()`
+above, which has the same limitation for a different reason.
+
 ### Smaller unknowns
 
 - `0x0232` Param0 = 175 in every LightBurn jog. Purpose unknown; moves nothing.
@@ -353,8 +364,8 @@ protocol gap.
 
 ### Closed as not protocol issues
 
-EMSTOP (hardware interlock), tickle-during-mark (hardware mux - BslApp behaves
-identically).
+Tickle-during-mark: the board multiplexes the tickle out while marking, and the
+vendor software behaves identically. Hardware, not a gap in this API.
 
 ---
 

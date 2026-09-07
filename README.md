@@ -139,6 +139,7 @@ Verified on hardware with a scope.
 | MOPA | pulse width and type code both unverified, no MOPA laser here |
 | UV, green, YAG | type codes unverified |
 | Linux, macOS | backend written, never run |
+| **EMSTOP** | sits at 5 V and never moves. Nothing in the command set drives it and the vendor software offers no way to assert it either, so it looks like a pure hardware interlock line rather than something the host can read or control |
 | SGIN0..2 | OR'd into one bit, so you learn *that* a fault fired, never *which* |
 | SGIN3 | on the connector, in no status field |
 | Job complete | no flag found. `0x0101` byte 2 bit 3 only says the engine was started, and `free_cache()` reads idle even while vectors execute, so neither can be polled for completion |

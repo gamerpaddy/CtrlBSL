@@ -370,6 +370,10 @@ SGIN0, SGIN1 and SGIN2 are OR'd into a single bit, so you learn *that* a fault
 fired, never *which*. `guard()` polls over USB, roughly 4 to 8 ms per round trip,
 and dies with the host process: **it is not an interlock.**
 
+**EMSTOP is not visible from here either.** The pin sits at 5 V, no command
+moves it, and it appears in no status field, so emergency stop cannot be read or
+asserted over USB. It has to break the circuit in hardware.
+
 ### Reading the board
 
 ```python
