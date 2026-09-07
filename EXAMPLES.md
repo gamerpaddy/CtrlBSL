@@ -222,6 +222,14 @@ the clock never returns to idle, and the next frame's first byte is mangled.
 `0x78` and `0x00` are fine, `0x7F` is not. The API warns rather than emitting a
 bad frame.
 
+The board drives **all eight** power bits, including P1 and P2: a power byte of
+`0x06`, bits 1 and 2 only, raises both pins with no frame sent at all. It
+asserts them from the job header and holds them for the whole job, then shifts
+the pulse frame out on top of two of them. So MOPA power is not six bits by
+design, it is eight with two that collide, and keeping them clear is on you.
+That leaves bits 0, 3, 4, 5, 6 and 7, so 64 usable levels.
+
+
 Sweeping widths at a fixed power, the usual way to find a setting for a
 material:
 

@@ -453,3 +453,11 @@ byte rather than silently emitting a bad frame.
 
 Laser type `0x55` mutes every output on the board tested, so drive a MOPA
 source as `FIBER` and set the pulse width. The optical result is unverified.
+
+The board drives **all eight** power bits, including P1 and P2: a power byte of
+`0x06`, bits 1 and 2 only, raises both pins with no frame sent at all. It
+asserts them from the job header and holds them for the whole job, then shifts
+the pulse frame out on top of two of them. So MOPA power is not six bits by
+design, it is eight with two that collide, and keeping them clear is on you.
+That leaves bits 0, 3, 4, 5, 6 and 7, so 64 usable levels.
+
