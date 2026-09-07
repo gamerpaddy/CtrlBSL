@@ -108,9 +108,9 @@ with Job(CO2) as j:
     j.tick_off()
 ```
 
-`close()` does this for you if that job had the tickle on, but a killed process
-does not. If a pin is still ticking from an earlier run, the snippet above
-clears it.
+`close()` does this for you if that job had the tickle on, while a killed
+process leaves it running. If a pin is still ticking from an earlier run, the
+snippet above clears it.
 
 Marking with no tickle at all, leaving the shape configured:
 
@@ -121,18 +121,18 @@ with Job(CO2) as j:
     j.lines([(0xC000, 0x8000)], speed=300)
 ```
 
-The tickle does **not** appear in the low phases of the marking PWM. The board
-multiplexes it out while marking, so you get tickle or marking, never both
-interleaved. That is hardware behaviour, not a limitation here.
+The low phases of the marking PWM stay **clear of the tickle**. The board
+multiplexes it out while marking, so you get tickle or marking, one at a time.
+That is hardware behaviour, and it matches the vendor software.
 
-**Analog power (DA1, pin 15) does not work.** `ENPOWERANALOGOUT=0` in the
-machine config, and nothing else drives it on this machine either. Use PWM duty.
+**Analog power (DA1, pin 15) stays at 0 V.** `ENPOWERANALOGOUT=0` in the machine
+config, and every other software here leaves the pin alone too. Use PWM duty.
 
 ---
 
 ## Fiber
 
-Power is an **8-bit parallel word on P0..P7**, not a duty cycle. The board
+Power is an **8-bit parallel word on P0..P7**. The board
 latches it and strobes `PLATCH` on every change, so it is static: no marking run
 is needed to set it, and it persists until you change it.
 
@@ -149,7 +149,7 @@ with Job(FIBER) as j:
              (0x4000, 0x4000)], speed=400)
 ```
 
-**Use the raw byte, not a percentage.** The percentage path quantises as
+**Use the raw byte.** The percentage path quantises as
 `(pct * 255) // 100`, so many values are unreachable: no percentage produces
 exactly `0x80` (50% gives 127, 51% gives 130).
 
@@ -162,7 +162,7 @@ j.configure(power_pct=50)        # 127, not 128
 known level, or for bit-level testing of the P0..P7 wiring.
 
 This leaves a **live signal on the laser control output** until it is cleared.
-It is a power level, not a pulse. Clear it with `j.laser_off()`, or let
+It is a power level that stays put. Clear it with `j.laser_off()`, or let
 `close()` do it, or run `python -m dbk2jp off`.
 
 ```python
@@ -218,16 +218,16 @@ clocked out on **P1 (data)** and **P2 (clock)**. So 100 ns is `A5 01 00 64`,
 
 **Keep bits 1 and 2 of the power byte clear.** Those same two pins carry the
 parallel power word, so a byte like `0x7F` leaves them high after the frame,
-the clock never returns to idle, and the next frame's first byte is mangled.
-`0x78` and `0x00` are fine, `0x7F` is not. The API warns rather than emitting a
+the clock stays high instead of returning to idle, and the next frame's first
+byte is mangled. `0x78` and `0x00` are fine, `0x7F` breaks it. The API warns rather than emitting a
 bad frame.
 
 The board drives **all eight** power bits, including P1 and P2: a power byte of
 `0x06`, bits 1 and 2 only, raises both pins with no frame sent at all. It
 asserts them from the job header and holds them for the whole job, then shifts
-the pulse frame out on top of two of them. So MOPA power is not six bits by
-design, it is eight with two that collide, and keeping them clear is on you.
-That leaves bits 0, 3, 4, 5, 6 and 7, so 64 usable levels.
+the pulse frame out on top of two of them. So MOPA power is eight bits with two
+that collide, and keeping those two clear is on you. That leaves bits 0, 3, 4,
+5, 6 and 7, so 64 usable levels.
 
 
 Sweeping widths at a fixed power, the usual way to find a setting for a
@@ -244,7 +244,7 @@ with Job(FIBER) as j:
 ```
 
 The frame on the wire is confirmed at 100, 150 and 200 ns. The **optical**
-result is not: there is no MOPA source here to measure what the laser does with
+result remains open: a MOPA source is needed to measure what the laser does with
 it.
 
 ---
@@ -267,7 +267,7 @@ with Job(GREEN) as j:
     j.lines([(0xC000, 0x4000), (0xC000, 0xC000)], speed=250)
 ```
 
-**Type codes unverified.** `0x33` and `0x44` were never confirmed with a laser
+**Type codes unverified.** `0x33` and `0x44` are still to be confirmed with a laser
 of either type attached. The PWM itself is the same
 generator CO2 uses, which is verified.
 
@@ -276,7 +276,7 @@ generator CO2 uses, which is verified.
 ## YAG
 
 PWM duty, no tickle. Q-switched YAG lasers normally want first-pulse
-suppression, which **this board does not appear to drive**.
+suppression, which **this board appears to leave alone**.
 
 ```python
 from dbk2jp import Job, YAG
@@ -287,15 +287,15 @@ with Job(YAG) as j:
     j.lines([(0xC000, 0x4000), (0xC000, 0xC000)], speed=250)
 ```
 
-The YAG **type code `0x00` is a guess**: it is the only unused low nibble and was
-never confirmed. If you have a YAG head, this is the first thing to check.
+The YAG **type code `0x00` is a guess**: it is the only free low nibble and is
+still unconfirmed. If you have a YAG head, this is the first thing to check.
 
-**FPS (pin 6) never moves.** Tried and failed: the config FPK values
+**FPS (pin 6) holds at its idle level.** Everything tried so far: the config FPK values
 (`ENFPK=1`, `FPK=40`, `OPC_FPKTIME=20`), tick flags `0x0200` and `0x0300`, a
 sweep of every output port index, and `0x0218`, the Q-switch FPK branch, across
-four laser types and both Q-switch flags. No `FPS` string exists in any shipped
-DLL. If your machine needs first-pulse suppression, it is not reachable from
-here.
+four laser types and both Q-switch flags. The string `FPS` is absent from every
+shipped DLL. If your machine needs first-pulse suppression, it has to come from
+elsewhere.
 
 The `0x0218` command is packed if you want to keep digging:
 
@@ -355,7 +355,7 @@ field.set(size_mm=110.0,
 ```
 
 `set()` validates: an unknown factor, a zero field size or an aspect of 0%
-raises rather than writing a config that cannot work.
+raises rather than writing a config that would fail.
 
 From the command line, without writing any code:
 
@@ -416,22 +416,22 @@ j.jump_mm(80, 0, clamp=True)    # clip to the edge instead
 | `GALVOTRAPEDISTOR0/1` | trapezoid / keystone | conventional model, unverified |
 
 The four distortion families are named and applied, but their exact formulas are
-not known, and in the `markcfg0` available here every one of
-them is `1.0`, meaning identity, so there was nothing to measure against. They
+still open, and in the `markcfg0` available here every one of
+them is `1.0`, meaning identity, so there was no deviation to measure against. They
 are implemented with the conventional galvo model and are a **no-op at 1.0**,
 which is what most real configs carry. If yours differs, check a test pattern
 before trusting it.
 
 ### Optical correction
 
-A galvo head does not paint a perfect square, and machines ship a per-head
-correction table applied on the host. Nothing in this board's command set takes
-one, so it has to happen here.
+A galvo head paints a slightly distorted square, and machines ship a per-head
+correction table applied on the host. This board's command set leaves that to
+the host, so it has to happen here.
 
 **Reading a `.cor` file is an unfinished feature.** It is on hold until a real
-one turns up to test against: no sample was available and the tool that
-generates them could not be run, so there was nothing to check an
-implementation against. `load_cor()` raises rather than returning a transform
+one turns up to test against: a sample is still needed and the tool that
+generates them refused to run here, leaving an implementation without a
+reference to check itself against. `load_cor()` raises rather than returning a transform
 that might be subtly wrong, since a bad correction still puts the beam
 somewhere plausible.
 
@@ -568,25 +568,26 @@ j.laser_off()      # marking PWM, tickle and gate, all off
 python -m dbk2jp off
 ```
 
-Laser outputs are levels and they latch. A plain reset does not clear them.
+Laser outputs are levels and they latch. **A plain reset leaves them live.**
 `close()` runs this for any job that programmed an output, `with Job(...)` calls
-`close()`, and an exit hook catches a script that does neither. A hard kill is
-not caught.
+`close()`, and an exit hook catches a script that skips both. **A hard kill
+escapes all of it.**
 
 SGIN0, SGIN1 and SGIN2 are OR'd into a single bit, so you learn *that* a fault
-fired, never *which*. `guard()` polls over USB, roughly 4 to 8 ms per round trip,
-and dies with the host process: **it is not an interlock.**
+fired, while *which* one stays hidden. `guard()` polls over USB, roughly 4 to
+8 ms per round trip, and dies with the host process: **treat it as a status poll
+and put the interlock in hardware.**
 
-**EMSTOP is not visible from here either.** The pin sits at 5 V, no command
-moves it, and it appears in no status field, so emergency stop cannot be read or
-asserted over USB. It has to break the circuit in hardware.
+**EMSTOP stays outside the host's reach.** The pin sits at 5 V, the command set
+leaves it alone, and it is absent from every status field, so emergency stop is
+readable and assertable only in hardware. It has to break the circuit there.
 
 ### Reading the board
 
 ```python
 from dbk2jp import Job
 
-with Job(unlock_now=False) as j:                # read-only, does not touch state
+with Job(unlock_now=False) as j:                # read-only, leaves state alone
     print(j.input_pin(0), j.input_pin(1), j.input_pin(2))
     print("remark", j.remark(), "sgin ok", j.sgin())
     print("free cache", j.free_cache(), "of 256")
@@ -610,5 +611,5 @@ with Job(unlock_now=False) as j:
     j.out(1, 0)          # OUT1 low
 ```
 
-`OUT2` and `OUT3` are the stepper `DIR` and `PULSE` pins. Do not drive them with
+`OUT2` and `OUT3` are the stepper `DIR` and `PULSE` pins. Leave them alone when using
 `out()` while an axis move is running.

@@ -24,7 +24,7 @@ per laser type, see [EXAMPLES.md](EXAMPLES.md).
 
 The public API is identical on both. Only the transport differs.
 
-Nothing is installed - put the `dbk2jp/` folder next to your script.
+Zero install: put the `dbk2jp/` folder next to your script.
 
 ```python
 from dbk2jp import Job
@@ -95,8 +95,8 @@ Board(path=r"\\\\?\\usb#...")
 
 ### Windows only: the interface GUID
 
-**The interface GUID is not portable.** It comes from whichever `.inf` bound the
-board, not from the hardware. On the development machine one instance of
+**The interface GUID varies per machine.** It comes from whichever `.inf` bound
+the board, so it is a property of the driver package rather than the hardware. On the development machine one instance of
 `VID_04B4&PID_1004` carried Cypress's stock
 `{AE18AA60-7F6A-11D4-97DD-00010229B959}` while a second carried
 `{090DE41C-61CA-48A8-AAA8-BBBB057F58A1}` from a different OEM package. So
@@ -108,8 +108,8 @@ board, not from the hardware. On the development machine one instance of
 2. falls back to the stock Cypress GUID;
 3. keeps only paths carrying VID `04B4` / PID `1004`.
 
-VID and PID are fixed for this board; the GUID is not. Earlier revisions
-hardcoded the GUID and took the first path enumerated - that worked on exactly
+VID and PID are fixed for this board, while the GUID varies. Earlier revisions
+hardcoded the GUID and took the first path enumerated, which worked on exactly
 one machine.
 
 ---
@@ -153,7 +153,8 @@ back-to-back reads stale registers and fails silently.
 
 Larger sets are kept for debugging: `SETS["bare"|"rb"|"wake"|"core"|"auth"|"min"|"full"]`.
 
-**Read the unlock state from `0x0102` byte 7, never `0x0101` bit 5.** Bit 5 is a
+**Read the unlock state from `0x0102` byte 7, and treat `0x0101` bit 5 as
+unrelated.** Bit 5 is a
 ready/arm flag; the reset tail sets it with the LED still red.
 
 ---
@@ -188,11 +189,11 @@ The code is the high byte of `0x0211` Param0. `LASERS` holds the table;
 
 `configure(freq_khz, power_pct, power_byte, mopa_pulse, tickle, tick_khz,
 tick_us, mo)` stores the
-settings and emits nothing: they go into each job's EP 0x02 header. Pass
+settings and stays silent on the wire: they go into each job's EP 0x02 header. Pass
 `power_pct` or `power_byte`, whichever suits the laser, and the other is
 derived. It raises on a frequency outside the type's range, a tickle on a laser
-without one, and a pulse width on a laser that is not parallel-power (so `FIBER`
-and `MOPA` accept one, the PWM types do not).
+without one, and a pulse width on any laser outside the parallel-power family,
+so `FIBER` and `MOPA` accept one while the PWM types reject it.
 
 The tickle has its own frequency and width, set with `tick_khz` / `tick_us` or
 `tick()`. Range is 0.74 to 100 kHz and the width must be shorter than the
@@ -216,7 +217,7 @@ Job(CO2, field=Field.load_or_create("markcfg0"))
 | `Field.from_markcfg(path)` | load an existing config, raises if missing |
 | `Field.load_or_create(path, **defaults)` | load, writing a default config first if there is none. `field.created` says which happened |
 | `field.set(**factors)` | adjust in place, validated |
-| `field.save(path=None)` | write back, preserving keys this library does not use |
+| `field.save(path=None)` | write back, preserving keys beyond the ones this library reads |
 | `field.as_markcfg()` | the factors as config key/value strings |
 
 Also `python -m dbk2jp field [path] [key=value ...]`.
@@ -259,7 +260,7 @@ executing. Time your own waits; `axis_move()` returns its expected duration for
 exactly this reason.
 
 **Laser outputs latch.** A power level stays on the laser control pin until it
-is cleared; a plain reset does not clear it, the generator has to be zeroed
+is cleared. A plain reset leaves it running: the generator has to be zeroed
 through the EP 0x02 header. `laser_off()` does that, `close()` calls it, and an
 exit hook catches a script that exits without either. Order matters inside
 `laser_off()`: arming before zeroing restarts the engine with the old values
@@ -268,7 +269,7 @@ loaded and emits a burst.
 MO and PA (CON3 pins 18 and 19) are enabled by `0x0211` Param1 bit 8, exposed
 as `mo(True)` or `configure(mo=True)`. With the bit clear both stay low however
 long the engine runs, which is why the `0x0281` / `0x0280` command pair appears
-to do nothing: it is not what drives them. With it set, both come up as the job
+to be inert: something else drives these pins. With it set, both come up as the job
 starts and drop when it ends. They are amplifier enables on the laser side, so
 the bit is off by default and `laser_off()` clears it. Set it before `begin()`;
 it takes effect with the next job header.
@@ -279,11 +280,11 @@ executes, so the gap is however long the host takes to deliver that vector:
 500 ms wait between them. The floor is engine start latency and it quantises in
 steps of about 41 ms, landing on 41 or 82 depending on the run, so treat single
 measurements as approximate. Adding unrelated parameter commands to the header
-does not change it (0, 1, 2 and 3 copies all measured the same), but `0x0206`
+leaves it unchanged (0, 1, 2 and 3 copies all measured the same), while `0x0206`
 adds a repeatable 60 ms. On the way
 down PA drops when the vectors stop and MO follows at the reset, about 39 ms
 later, and that gap is constant. `0x0211` Param2 is documented as an MO delay
-but changing it does not move any of this.
+but changing it leaves all of this where it is.
 
 `pwm_burst` is closed-loop against the board's own counter. Open-loop pacing
 drains the queue between chunks and the output visibly drops to tickle-only
@@ -333,10 +334,12 @@ SGIN carries laser fault lines - overheat, back-reflection, ready - which vary
 by laser model. Any assertion must stop marking and laser output.
 
 **SGIN0, SGIN1 and SGIN2 are OR'd into one bit** (byte 2 bit 1). The board tells
-you that *some* SGIN asserted, never which. Per-fault handling requires reading
-the lines outside this board. SGIN3 does not appear in the status reply at all.
+you that *some* SGIN asserted, while which one stays hidden. Per-fault handling
+requires reading the lines outside this board. SGIN3 is absent from the status
+reply entirely.
 
-**`guard()` is not an interlock.** It is a USB poll: ~4 to 8 ms per round trip, so
+**`guard()` is a status poll, and hardware owns the interlock.** It is a USB
+poll: ~4 to 8 ms per round trip, so
 worst-case reaction is tens of milliseconds, and it dies with the host process.
 E-stop belongs in hardware.
 
@@ -351,11 +354,12 @@ j.out_state()                   # 0x0112
 ```
 
 `0x0111` takes the **port index in the high byte of Param0** and the level in
-Param1 - it is not a bitmask. Writing `0x0001` to Param0 addresses port 0 with
-level 0 and does nothing, which is what the first attempts did.
+Param1, so it behaves as an index rather than a bitmask. Writing `0x0001` to
+Param0 addresses port 0 with level 0 and leaves the pin where it was, which is
+what the first attempts did.
 
 **OUT2 and OUT3 are the stepper `DIR` and `PULSE` pins**, owned by
-`axis_move()`. Do not drive them with `out()` while an axis move is running.
+`axis_move()`. Leave them to `axis_move()` while an axis move is running.
 
 ---
 
@@ -382,49 +386,51 @@ Accel and decel are symmetric. They only look asymmetric over a wide rate span
 
 Documented so nobody re-runs these experiments.
 
-### FPS - first pulse suppression (CON3 pin 6) - not reachable
+### FPS - first pulse suppression (CON3 pin 6) - out of reach
 
-Never observed to move. Exhausted:
+Holds at its idle level in every test so far. Exhausted:
 
 - 48 triggered mark-starts with the real config values (`ENFPK=1`, `FPK=40`,
   `OPC_FPKTIME=20`), tick flags `0x0200` / `0x0300`, laser types `0x33`, `0x44`.
-- Output-port sweep: every `0x0111` index 0-15 toggled together. Not a GPIO.
-- `0x0218`, the Q-switch FPK branch of `SendPenPara`, which the first round never
-  sent: `Param0 = (qs<<8) | (FPKTime>>8)`, `Param1 = (FPKTime&0xFF)<<8`, `qs` 3
+- Output-port sweep: every `0x0111` index 0-15 toggled together, so it lives outside the GPIO block.
+- `0x0218`, the Q-switch FPK branch of `SendPenPara`, which the first round
+  omitted: `Param0 = (qs<<8) | (FPKTime>>8)`, `Param1 = (FPKTime&0xFF)<<8`, `qs` 3
   or 7. Across laser types `0x00`/`0x22`/`0x33`/`0x66`, FPKTime 20 and 40.
-- No `FPS`, `FirstPulse` or `PulseSuppress` string in any shipped DLL.
+- The strings `FPS`, `FirstPulse` and `PulseSuppress` are absent from every
+  shipped DLL.
 
-Most likely a board-variant pin this firmware never drives.
+Most likely a board-variant pin that this firmware leaves alone.
 
-### DA1 - analog CO2 power (CON3 pin 15) - not reachable
+### DA1 - analog CO2 power (CON3 pin 15) - out of reach
 
-`j.dac()` produces no voltage. `ENPOWERANALOGOUT=0` in `markcfg0`, and
+`j.dac()` leaves the pin at 0 V. `ENPOWERANALOGOUT=0` in `markcfg0`, and
 `SendPenPara` only emits the analog command (`0x0207`) for `iLsrType` 0 or 6.
-**No other software drives it here either**, so this is a machine-config issue, not a
-protocol gap.
+**Every other software on this machine leaves the pin alone too**, so this looks
+like a machine-config issue rather than a protocol gap.
 
-### EMSTOP - not readable or drivable
+### EMSTOP - hardware only
 
-The pin sits at 5 V and never changed across any test. No command in the set
-moves it, it appears in no status field, and nothing here can assert it. It behaves as a hardware interlock line that the host is simply
-not part of.
+The pin sits at 5 V throughout every test. The command set leaves it alone, it
+is absent from every status field, and the host lacks any way to assert it. It
+behaves as a hardware interlock line that the host sits outside of.
 
-This matters for safety design: you cannot read emergency-stop state over USB,
-so an E-stop has to break the circuit in hardware. See the note on `guard()`
+This matters for safety design: emergency-stop state is readable only in
+hardware, so an E-stop has to break the circuit there. See the note on `guard()`
 above, which has the same limitation for a different reason.
 
 ### Smaller unknowns
 
-- `0x0232` Param0 = 175 in every LightBurn jog. Purpose unknown; moves nothing.
+- `0x0232` Param0 = 175 in every captured jog. Purpose unknown; it leaves every observed pin where it was.
 - `0x1667` appears 269× in the ramp capture and in no opcode table.
 - `0x0211` Param3/Param4 carry a 32-bit float lost to `_ftol2_sse`; always sent as 0.
 - `laser_port_switch()` (`0x2F84`) and `out_pulse()` (`0x2F82`) are untested.
 - SGIN3 is on the connector but in no status field.
 
-### Closed as not protocol issues
+### Closed as hardware behaviour
 
 Tickle-during-mark: the board multiplexes the tickle out while marking, and the
-other software behaves identically. Hardware, not a gap in this API.
+other software behaves identically. This is hardware, and it matches vendor
+behaviour.
 
 ---
 
@@ -432,7 +438,7 @@ other software behaves identically. Hardware, not a gap in this API.
 
 - **The tickle generator is free-running.** It keeps pulsing after the job ends
   *and after the host process exits*. `close()` handles it; a killed process
-  does not.
+  leaves it running.
 - **The unlock latch is sticky.** Once green it survives everything short of a
   power cycle - a deliberately corrupted digest is ignored silently. Testing the
   unlock path costs one power cycle per experiment.
@@ -442,14 +448,14 @@ other software behaves identically. Hardware, not a gap in this API.
 
 ## MOPA pulse width
 
-`0x0206` carries a four byte SPI frame, not a parameter: `A5 01` then the
+`0x0206` carries a four byte SPI frame rather than a parameter: `A5 01` then the
 width big-endian, clocked out on **P1 (data)** and **P2 (clock)**. The unit is
 **nanoseconds**, so `mopa_pulse(100)` puts `A5 01 00 64` on the wire.
 Confirmed at 100, 150 and 200 ns.
 
 P1 and P2 are also bits 1 and 2 of the parallel power word, so a power byte
-with either set holds them high after the frame and the clock never returns to
-idle, mangling the next frame's first byte. `0x7F` corrupts every frame after
+with either set holds them high after the frame, so the clock stays high instead
+of returning to idle and the next frame's first byte is mangled. `0x7F` corrupts every frame after
 the first, `0x00` gives clean ones. `mopa_pulse()` warns on a colliding power
 byte rather than silently emitting a bad frame.
 
@@ -459,7 +465,7 @@ source as `FIBER` and set the pulse width. The optical result is unverified.
 The board drives **all eight** power bits, including P1 and P2: a power byte of
 `0x06`, bits 1 and 2 only, raises both pins with no frame sent at all. It
 asserts them from the job header and holds them for the whole job, then shifts
-the pulse frame out on top of two of them. So MOPA power is not six bits by
-design, it is eight with two that collide, and keeping them clear is on you.
-That leaves bits 0, 3, 4, 5, 6 and 7, so 64 usable levels.
+the pulse frame out on top of two of them. So MOPA power is eight bits with two
+that collide, and keeping those two clear is on you. That leaves bits 0, 3, 4,
+5, 6 and 7, so 64 usable levels.
 
