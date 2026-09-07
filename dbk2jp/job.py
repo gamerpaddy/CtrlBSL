@@ -19,6 +19,7 @@ from . import protocol as S
 from .usb import Board
 from .unlock import unlock, encrypt_state
 from . import laser as _laser
+from .field import Field
 from .laser import CO2, FIBER, UV, GREEN, MOPA, YAG, LASERS, Laser
 
 # Raw type codes, kept for callers that had them hardcoded. Prefer the names.
@@ -36,8 +37,10 @@ class Job:
             j.configure(freq_khz=20, power_pct=50)
     """
 
-    def __init__(self, laser=CO2, board=None, index=0, unlock_now=True):
+    def __init__(self, laser=CO2, board=None, index=0, unlock_now=True,
+                 field=None):
         self.b = board if board is not None else Board(index=index)
+        self.field = field if field is not None else Field()
         self.select(laser)
         if unlock_now:
             self.ensure_unlocked()
@@ -293,6 +296,34 @@ class Job:
         or Y moves the corresponding mirror. Goes on EP 0x02 like every other geometry command.
         """
         self.b.write_data(S.cmd(0x0241, speed, x & 0xFFFF, y & 0xFFFF, 0, delay))
+
+    # ---- millimetres -----------------------------------------------------
+    #
+    # The board only understands 16-bit galvo counts. These convert through
+    # self.field, which carries the machine's field size, offsets and optical
+    # correction. See field.py.
+
+    def mm(self, x_mm, y_mm, clamp=False):
+        """(x_mm, y_mm) -> (x_counts, y_counts) for this machine's field."""
+        return self.field.to_counts(x_mm, y_mm, clamp=clamp)
+
+    def where_mm(self, x_counts, y_counts):
+        """Counts back to millimetres."""
+        return self.field.to_mm(x_counts, y_counts)
+
+    def jump_mm(self, x_mm, y_mm, speed=0x2710, delay=0x01F4, clamp=False):
+        """Unlit move to a point in millimetres."""
+        x, y = self.mm(x_mm, y_mm, clamp)
+        return self.jump(x, y, speed=speed, delay=delay)
+
+    def begin_mm(self, start=(0.0, 0.0), speed=200, clamp=False):
+        """begin() with the start point in millimetres."""
+        return self.begin(start=self.mm(start[0], start[1], clamp), speed=speed)
+
+    def lines_mm(self, points_mm, speed=200, clamp=False):
+        """lines() with every point in millimetres."""
+        return self.lines([self.mm(x, y, clamp) for x, y in points_mm],
+                          speed=speed)
 
     def free_cache(self):
         """Free queue slots, from bytes 5-6 of the 0x0101 reply.

@@ -59,6 +59,8 @@ matters if you build commands yourself.
 | `dbk2jp/_libusb.py` | Linux/macOS backend -- pyusb bulk transfers (untested) |
 | `dbk2jp/protocol.py` | the 12-byte `tagSeaCMD` wire format, opcode constants, parameter packing |
 | `dbk2jp/unlock.py` | the 3-frame ATSHA204 replay that turns the 加密 LED green |
+| `dbk2jp/field.py` | millimetres to galvo counts (`Field`), `markcfg0` reader |
+| `dbk2jp/cor.py` | `.cor` optical correction (scaffold, format not recovered) |
 | `dbk2jp/job.py` | the high-level API (`Job`) |
 | `dbk2jp/__main__.py` | `python -m dbk2jp …` |
 
@@ -200,6 +202,24 @@ period; both are checked.
 `configure(mopa_pulse=...)` for the next job, or `mopa_pulse(value)` to send it
 now. Read out of the vendor pen-parameter path, which emits it whenever
 `nMopaPulse` changes. **Untested** - no MOPA laser here.
+
+### Millimetres
+
+```python
+Job(CO2, field=Field.from_markcfg("markcfg0"))
+```
+
+| Method | Notes |
+|---|---|
+| `mm(x, y, clamp=False)` | mm to galvo counts |
+| `where_mm(cx, cy)` | counts back to mm |
+| `jump_mm(x, y)` / `begin_mm(start)` / `lines_mm(points)` | mm equivalents |
+
+Out-of-field coordinates raise unless `clamp=True`. `Field` carries field size,
+offsets, per-axis aspect, mirror and axis swap (all exact) plus the barrel,
+horizontal-vertical and trapezoid terms (conventional model, unverified: every
+one is `1.0` in the available config). `Field.correction` takes a `Correction`
+from `cor.py`; see EXAMPLES.md for the `.cor` situation.
 
 ### Marking
 

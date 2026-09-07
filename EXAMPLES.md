@@ -12,6 +12,7 @@ corners. `speed` is the galvo rate for that move.
 - [MOPA](#mopa)
 - [UV and green](#uv-and-green)
 - [YAG](#yag)
+- [Working in millimetres](#working-in-millimetres)
 - [Machine integration](#machine-integration) (rotary, homing, triggers, faults)
 
 ---
@@ -275,6 +276,117 @@ with Job(YAG) as j:
                        (FPKTIME & 0xFF) << 8, 0, 0, 0))
     j.lines([(0xC000, 0x8000)], speed=250)
 ```
+
+---
+
+## Working in millimetres
+
+The board only understands 16-bit galvo counts. `Field` converts, using the
+machine's own `markcfg0` so the numbers match what the vendor software would
+produce.
+
+```python
+from dbk2jp import Job, Field, CO2
+
+field = Field.from_markcfg("markcfg0")      # FIELDSIZE, offsets, aspect, mirror
+print(field)                                # <Field 100 mm, offset (0, 0), ...>
+
+with Job(CO2, field=field) as j:
+    j.configure(freq_khz=20, power_pct=40)
+    j.begin_mm(start=(-20, -20))            # a 40 mm square, centred
+    j.lines_mm([(20, -20), (20, 20), (-20, 20), (-20, -20)])
+```
+
+Without a config file, state the field size directly:
+
+```python
+field = Field(size_mm=110.0, offset_mm=(0.0, 0.0))
+```
+
+Converting by hand:
+
+```python
+j.mm(25, -10)              # -> (0xC000, 0x6667)
+j.where_mm(0x8000, 0x8000) # -> (0.0, 0.0)
+```
+
+`jump_mm()`, `begin_mm()` and `lines_mm()` mirror the count-based calls. A point
+outside the field **raises** rather than wrapping, since a wrapped coordinate
+puts the beam somewhere plausible but wrong:
+
+```python
+j.jump_mm(80, 0)
+# ValueError: X=80.000 mm is outside the 100 mm field (centre 0, 0)
+
+j.jump_mm(80, 0, clamp=True)    # clip to the edge instead
+```
+
+### What comes out of markcfg0
+
+| Key | Meaning | Status |
+|---|---|---|
+| `FIELDSIZE` | field width in mm across the full DAC span | exact |
+| `FIELDOFFSETX/Y` | centre offset in mm | exact |
+| `GALVOASPECT0/1` | per-axis scale, percent | exact |
+| `GALVONEGATE0/1` | per-axis mirror | exact |
+| `GALVOX` | swap X and Y | exact |
+| `GALVODISTOR0/1` | barrel / pincushion | conventional model, unverified |
+| `GALVOHORVER0/1` | horizontal-vertical ratio | conventional model, unverified |
+| `GALVOTRAPEDISTOR0/1` | trapezoid / keystone | conventional model, unverified |
+
+The four distortion families are named and applied by the vendor, but the exact
+formulas were not recovered, and in the `markcfg0` available here every one of
+them is `1.0`, meaning identity, so there was nothing to measure against. They
+are implemented with the conventional galvo model and are a **no-op at 1.0**,
+which is what most real configs carry. If yours differs, check a test pattern
+before trusting it.
+
+### Optical correction (.cor)
+
+**Not working, scaffold only.** A galvo head does not paint a perfect square,
+and vendors ship a per-head correction table applied on the host. Nothing in
+this board's command set takes one, so it has to happen here.
+
+What was established: correction lives in `calib.dll`, which exports
+`getCalibCoefFromFile`, `getCalibCoefs` and `preCalibPoint`. A `.cor` is a
+"UCF" file parsed by `loadUcf` with C++ stream extraction into doubles, so it is
+**text**, and it carries calibration points that are fitted to **coefficients**
+rather than being a ready-made lookup grid.
+
+What was not: the token grammar. It could not be recovered from the decompile
+and no `.cor` file was available to test a guess, so `load_cor()` raises instead
+of returning a subtly wrong transform.
+
+```python
+from dbk2jp import load_cor
+load_cor("machine.cor")
+# NotImplementedError: machine.cor: 4096 bytes, looks like text. Parsing is
+# not implemented -- see dbk2jp/cor.py
+```
+
+The transform side is finished and wired into `Field`, so filling in
+`parse_cor()` is the only remaining work. Meanwhile you can calibrate from
+measured points, which is what the vendor UI does anyway:
+
+```python
+from dbk2jp import Field, GridCorrection, Job, CO2
+
+# mark a grid, measure where the marks actually landed
+pairs = [((-20, -20), (-19.4, -20.3)),
+         (( 20, -20), ( 20.6, -20.2)),
+         (( 20,  20), ( 20.5,  19.6)),
+         ((-20,  20), (-19.5,  19.7))]
+
+field = Field(size_mm=100.0, correction=GridCorrection.from_points(pairs))
+
+with Job(CO2, field=field) as j:
+    j.configure(freq_khz=20, power_pct=40)
+    j.begin_mm(start=(-20, -20))
+    j.lines_mm([(20, -20), (20, 20), (-20, 20), (-20, -20)])
+```
+
+`PolyCorrection(cx, cy)` is there too, matching the bivariate-polynomial shape
+`preCalibPoint` implies, for when the coefficients are known.
 
 ---
 

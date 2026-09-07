@@ -107,6 +107,7 @@ Per-laser-type examples, plus machine integration: **[EXAMPLES.md](EXAMPLES.md)*
 - **MOPA** pulse width and a width sweep
 - **UV / green** PWM duty, no tickle
 - **YAG** and where first-pulse suppression stops
+- **Millimetres** field setup from `markcfg0`, mm coordinates, optical correction
 - **Machine integration** rotary axis, homing on the origin switch, trigger
   input, fault handling, pilot pointer, output ports
 
@@ -128,6 +129,7 @@ Verified on hardware with a scope.
 | SGIN | laser fault line plus `abort()` and `guard()` |
 | Outputs | OUT0, OUT1 via `0x0111` |
 | Stepper | pulse count, rate, direction, symmetric accel/decel |
+| Millimetre coordinates | field size, offsets, aspect, mirror and swap from `markcfg0` |
 | MO / AP / GATE | verified |
 
 ## What is missing
@@ -139,6 +141,8 @@ Verified on hardware with a scope.
 | MOPA | pulse width and type code both unverified, no MOPA laser here |
 | UV, green, YAG | type codes unverified |
 | Linux, macOS | backend written, never run |
+| **.cor files** | text "UCF" format handled by `calib.dll` (`getCalibCoefFromFile`, `preCalibPoint`), fitted to coefficients rather than a lookup grid. Grammar not recovered and no sample file to test against, so `load_cor()` raises. Transform side is done: calibrate with `GridCorrection.from_points()` meanwhile |
+| Galvo distortion terms | `GALVODISTOR`, `GALVOHORVER`, `GALVOTRAPEDISTOR` are all `1.0` (identity) in the available config, so the conventional model used for them is unverified |
 | **EMSTOP** | sits at 5 V and never moves. Nothing in the command set drives it and the vendor software offers no way to assert it either, so it looks like a pure hardware interlock line rather than something the host can read or control |
 | SGIN0..2 | OR'd into one bit, so you learn *that* a fault fired, never *which* |
 | SGIN3 | on the connector, in no status field |
