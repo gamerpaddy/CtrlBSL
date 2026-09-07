@@ -270,6 +270,14 @@ starts and drop when it ends. They are amplifier enables on the laser side, so
 the bit is off by default and `laser_off()` clears it. Set it before `begin()`;
 it takes effect with the next job header.
 
+MO leads PA. MO asserts on the header, PA only once the first lit vector
+executes, so the gap is however long the host takes to deliver that vector:
+41 ms with the header and vectors in a single write, 542 ms with a deliberate
+500 ms wait between them. The ~40 ms floor is engine start latency. On the way
+down PA drops when the vectors stop and MO follows at the reset, about 39 ms
+later, and that gap is constant. `0x0211` Param2 is documented as an MO delay
+but changing it does not move any of this.
+
 `pwm_burst` is closed-loop against the board's own counter. Open-loop pacing
 drains the queue between chunks and the output visibly drops to tickle-only
 about once a second.
