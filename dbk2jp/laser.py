@@ -77,7 +77,10 @@ LASERS = {
                      "output. PRR, P0, MO and PA all stay dead, while the "
                      "same job under the fiber code 0x11 drives all four. "
                      "0x0206 itself works fine under 0x11, so a MOPA source "
-                     "may be better driven as FIBER with mopa_pulse set."),
+                     "may be better driven as FIBER with mopa_pulse set. "
+                     "Pulse width is in nanoseconds and travels as an SPI "
+                     "frame on P1 and P2, so the power byte must have bits "
+                     "1 and 2 clear."),
     YAG: Laser(YAG, 0x00, "pwm", 20.0, (1.0, 40.0), verified=False,
                note="Type code is a guess: it is the only unused low nibble and "
                     "was never confirmed on hardware."),

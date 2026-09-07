@@ -37,6 +37,21 @@ CMD_PORT_PULSE = 0x2F82
 # set they both come up as soon as the job starts and drop when it ends.
 MO_ENABLE = 0x0100
 
+# 0x0206 with Param0 = 0xA501 is not a selector plus a value: the two params
+# are a four byte frame, 0xA5 0x01 then Param1 big-endian, shifted out over
+# SPI on P1 (data) and P2 (clock). Param1 is the pulse width in NANOSECONDS,
+# so 100 ns goes out as A5 01 00 64. Confirmed on the wire at 100/150/200 ns.
+MOPA_SPI_HDR  = 0xA501
+# Those two SPI lines are also bits 1 and 2 of the parallel power word. A
+# power byte with either set leaves them driven high after the frame, so the
+# clock never returns to idle and the NEXT frame's first byte is mangled.
+MOPA_SPI_MASK = 0x06
+
+
+def mopa_pulse_ns(ns):
+    """0x0206 frame carrying a MOPA pulse width in nanoseconds."""
+    return cmd(0x0206, MOPA_SPI_HDR, int(ns) & 0xFFFF, 0, 0, 0)
+
 FPGA_CLK_KHZ = 48000.0      # timebase for every period/width field
 
 

@@ -244,6 +244,7 @@ See EXAMPLES.md.
 | `pwm_burst(seconds, ...)` | sustained PWM for scope work, paced off `free_cache()` |
 | `red_light(on)` | pilot pointer, CON3 pin 22 |
 | `mo(on)` | enable MO and PA, `0x0211` Param1 bit 8 |
+| `mopa_pulse(ns)` | MOPA pulse width in nanoseconds, SPI frame on P1 and P2 |
 | `laser_port_switch(...)` | port switch, purpose unknown |
 | `running()` | engine started (`0x0101` byte 2 bit 3). **Not** "still marking" |
 | `free_cache()` | free queue slots, **0 to 256** |
@@ -436,3 +437,19 @@ other software behaves identically. Hardware, not a gap in this API.
 - **EP 0x02 overrun clears the ready bit.** `ucPara0` drops to `0x0e` and the
   board needs re-arming. Pace against `free_cache()`.
 - **Pausing with `0x0125`** also takes `ucPara0` to `0x0e`.
+
+## MOPA pulse width
+
+`0x0206` carries a four byte SPI frame, not a parameter: `A5 01` then the
+width big-endian, clocked out on **P1 (data)** and **P2 (clock)**. The unit is
+**nanoseconds**, so `mopa_pulse(100)` puts `A5 01 00 64` on the wire.
+Confirmed at 100, 150 and 200 ns.
+
+P1 and P2 are also bits 1 and 2 of the parallel power word, so a power byte
+with either set holds them high after the frame and the clock never returns to
+idle, mangling the next frame's first byte. `0x7F` corrupts every frame after
+the first, `0x00` gives clean ones. `mopa_pulse()` warns on a colliding power
+byte rather than silently emitting a bad frame.
+
+Laser type `0x55` mutes every output on the board tested, so drive a MOPA
+source as `FIBER` and set the pulse width. The optical result is unverified.

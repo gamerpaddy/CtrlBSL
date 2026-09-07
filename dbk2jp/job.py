@@ -15,6 +15,7 @@ board ACKs parameter commands on EP 0x06 and then silently ignores them.
 
 import atexit
 import time
+import warnings
 
 from . import protocol as S
 from .usb import Board
@@ -219,15 +220,48 @@ class Job:
         return self.unlocked()
 
     # ---- configuration --------------------------------------------------
-    def mopa_pulse(self, value):
-        """MOPA pulse width, 0x0206 Param0=0xA501 Param1=value, on EP 0x02.
+    def _check_spi_clash(self):
+        """Warn if the power word is sitting on the MOPA SPI lines.
 
-        UNTESTED -- no MOPA laser here to measure.
+        The pulse width goes out as a four byte SPI frame on P1 (data) and P2
+        (clock), and those are also bits 1 and 2 of the parallel power word. A
+        power byte with either bit set holds them high after the frame, so the
+        clock never returns to idle and the next frame's first byte is
+        mangled. Verified on the wire: 0x7F corrupts every frame after the
+        first, 0x00 gives three clean ones.
         """
-        self._mopa_pulse = value
+        if self._mopa_pulse is not None and (self._power_byte & S.MOPA_SPI_MASK):
+            warnings.warn(
+                "power byte 0x%02X has bit 1 or 2 set, and those are the MOPA "
+                "SPI data and clock lines. Pulse width frames after the first "
+                "will be corrupted. Use a power byte with 0x06 clear."
+                % self._power_byte, stacklevel=3)
+
+    def mopa_pulse(self, ns):
+        """MOPA pulse width in NANOSECONDS.
+
+        Emitted as 0x0206, which carries a four byte SPI frame rather than a
+        plain parameter: 0xA5 0x01 then the width big-endian, clocked out on
+        P1 (data) and P2 (clock). 100 ns goes out as A5 01 00 64. Confirmed on
+        the wire at 100, 150 and 200 ns.
+
+        The optical result is unverified, since there is no MOPA source here,
+        but the frame on the wire is what the laser expects.
+
+        The power byte must have bits 1 and 2 clear or consecutive frames
+        corrupt. See _check_spi_clash.
+        """
+        self._mopa_pulse = int(ns)
         self._live = True
-        self.b.write_data(S.cmd(0x0206, 0xA501, value & 0xFFFF, 0, 0, 0))
-        return value
+        self._check_spi_clash()
+        # The frame is only shifted out as part of an armed job header. Sent
+        # on its own it produces nothing at all on P1 and P2, so arm and send
+        # the header the same way power_byte() does.
+        self._cmd(S.cmd(0x0106))
+        self._cmd(S.cmd(0x0105))
+        self._cmd(S.cmd(0x0104))
+        self.b.write_data(self._header())
+        return self._mopa_pulse
 
     def tick(self, freq_khz=None, width_us=None, enable=True):
         """Set the tickle shape. Frequency and width are independent settings.
@@ -280,7 +314,8 @@ class Job:
                   S.MO_ENABLE if self._mo else 0, 0, 0, 0)
         h += pwr
         if self._mopa_pulse is not None:
-            h += S.cmd(0x0206, 0xA501, self._mopa_pulse & 0xFFFF, 0, 0, 0)
+            self._check_spi_clash()
+            h += S.mopa_pulse_ns(self._mopa_pulse)
         h += S.cmd(0x0217, 0x0100 if self._tickle else 0x0000,
                    tperiod & 0xFFFF, twidth & 0xFFFF, 0, 0)
         h += S.cmd(0x0208, 0, 0, 0, 0, 0)

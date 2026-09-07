@@ -84,35 +84,33 @@ that has none, and a pulse width on a laser that takes none.
 
 ### MOPA pulse width
 
-Separate from power and frequency: command `0x0206`, `Param0 = 0xA501`,
-`Param1 = pulse`, sent in the EP 0x02 job header.
+`0x0206` does not carry a plain parameter. Its two params are a four byte
+frame, `A5 01` then the width big-endian, clocked out over SPI on **P1 (data)**
+and **P2 (clock)**. The width is in **nanoseconds**, so 100 ns goes out as
+`A5 01 00 64`. Confirmed on the wire at 100, 150 and 200 ns.
 
 ```python
-from dbk2jp import Job, MOPA
+from dbk2jp import Job, FIBER
 
-with Job(MOPA) as j:
-    j.configure(freq_khz=30, power_byte=0x80, mopa_pulse=20)
-```
-
-`j.mopa_pulse(value)` sets it immediately instead of at the next job.
-
-On the board tested, laser type `0x55` **mutes every laser output**: PRR, P0, MO
-and PA all stay dead, while the identical job under the fiber code `0x11` drives
-all four. The `0x0206` command itself works fine under `0x11`, so until someone
-confirms `0x55` on another board, drive a MOPA source as `FIBER` and set
-`mopa_pulse`:
-
-```python
 with Job(FIBER) as j:
-    j.configure(freq_khz=30, power_byte=0x80, mo=True)
-    j.mopa_pulse(120)
+    j.configure(freq_khz=30, power_byte=0x78, mo=True)
+    j.mopa_pulse(100)          # nanoseconds
 ```
 
-The width itself is still unverified. `0x0206` is demonstrably processed, it
-costs a repeatable 60 ms in the job header, but that cost is identical for
-values 1, 120, 500 and 60000 and for every Param0 tried, so nothing here
-confirms what the value does. There is no MOPA laser here to measure.
+Two things to get right:
 
+**Do not use laser type `0x55`.** On the board tested it mutes every output:
+PRR, P0, MO and PA all stay dead, while the identical job under the fiber code
+`0x11` drives all four. `0x0206` works normally under `0x11`.
+
+**Keep bits 1 and 2 of the power byte clear.** P1 and P2 are also power word
+bits, so a byte like `0x7F` holds them high after the frame, the clock never
+returns to idle, and the next frame's first byte is mangled. `0x7F` corrupts
+every frame after the first; `0x00` gives clean ones. The API warns if you set
+a pulse width with a colliding power byte.
+
+The optical result is still unverified, there is no MOPA source here, but the
+frame on the wire is what the laser expects.
 ---
 
 ## Examples
@@ -155,7 +153,7 @@ Verified on hardware with a scope.
 |---|---|
 | **FPS** (pin 6) | never moves. config FPK values, a full output-port sweep and the `0x0218` Q-switch branch all tried. Likely a board-variant pin |
 | **DA1** analog (pin 15) | no voltage. `ENPOWERANALOGOUT=0`, and no other software drives it on this machine either, so this is machine config rather than protocol |
-| MOPA | pulse width and type code both unverified, no MOPA laser here |
+| MOPA | frame verified on the wire, optical result not. Type code 0x55 mutes every output on the board tested |
 | UV, green, YAG | type codes unverified |
 | Linux, macOS | backend written, never run |
 | **.cor files** | **unfinished feature.** On hold until a real `.cor` turns up to test against, so `load_cor()` raises rather than guessing. The transform side is done: calibrate with `GridCorrection.from_points()` meanwhile |

@@ -195,45 +195,51 @@ as the job starts and drop when it ends, and `laser_off()` clears the flag.
 
 ## MOPA
 
-A fiber laser with a settable **pulse width**, so it takes the fiber power byte
-plus one extra parameter.
+A fiber laser with a settable **pulse width**, in nanoseconds.
+
+**Use the fiber type, not `MOPA`.** On the board tested, type code `0x55`
+mutes every output: PRR, P0, MO and PA all stay dead, while the identical job
+under `0x11` drives all four. The pulse width command works normally under the
+fiber code.
 
 ```python
-from dbk2jp import Job, MOPA
+from dbk2jp import Job, FIBER
 
-with Job(MOPA) as j:
-    j.configure(freq_khz=30, power_byte=0x80, mopa_pulse=20)
+with Job(FIBER) as j:
+    j.configure(freq_khz=30, power_byte=0x78, mo=True)
+    j.mopa_pulse(100)                  # nanoseconds
     j.begin(start=(0x4000, 0x8000), speed=400)
     j.lines([(0xC000, 0x8000)], speed=400)
 ```
 
-Pulse width goes out as `0x0206`, `Param0 = 0xA501`, `Param1 = pulse`, inside
-the EP 0x02 job header. To change it immediately rather than at the next job:
+The width travels as a four byte SPI frame, `A5 01` then the value big-endian,
+clocked out on **P1 (data)** and **P2 (clock)**. So 100 ns is `A5 01 00 64`,
+150 ns is `A5 01 00 96`, 200 ns is `A5 01 00 C8`.
 
-```python
-j.mopa_pulse(35)
-```
+**Keep bits 1 and 2 of the power byte clear.** Those same two pins carry the
+parallel power word, so a byte like `0x7F` leaves them high after the frame,
+the clock never returns to idle, and the next frame's first byte is mangled.
+`0x78` and `0x00` are fine, `0x7F` is not. The API warns rather than emitting a
+bad frame.
 
-Sweeping widths at a fixed power, which is the usual way to find a setting for a
+Sweeping widths at a fixed power, the usual way to find a setting for a
 material:
 
 ```python
-with Job(MOPA) as j:
-    j.configure(freq_khz=30, power_byte=0x80)
-    for i, pulse in enumerate([2, 4, 8, 15, 30, 60]):
-        j.configure(mopa_pulse=pulse)
+with Job(FIBER) as j:
+    j.configure(freq_khz=30, power_byte=0x78, mo=True)
+    for i, ns in enumerate([50, 100, 150, 200, 250, 350]):
+        j.mopa_pulse(ns)
         y = 0x4000 + i * 0x1800
         j.begin(start=(0x4000, y), speed=400)
         j.lines([(0xC000, y)], speed=400)
 ```
 
-**Untested.** The type code `0x55` and the pulse-width command were never
-confirmed against a MOPA laser. The config
-allows 1 kHz to 2 MHz, far above anything measured here, so treat the frequency
-range in `laser.py` as conservative rather than correct.
+The frame on the wire is confirmed at 100, 150 and 200 ns. The **optical**
+result is not: there is no MOPA source here to measure what the laser does with
+it.
 
 ---
-
 ## UV and green
 
 Driven like CO2 (PWM duty) but with **no tickle**. `configure(tickle=True)`
