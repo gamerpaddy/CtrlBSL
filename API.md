@@ -10,10 +10,19 @@ real hardware with a scope.
 
 ## Requirements
 
-- Windows, Python 3.8+, no third-party packages (`ctypes` + `winreg` only).
-- The board bound to Cypress's **CYUSB3** driver. A board bound to WinUSB or
-  libusb enumerates but rejects every transfer.
-- No admin rights needed.
+- Python 3.8+.
+- **Windows**: no third-party packages (`ctypes` + `winreg`), and the board bound
+  to Cypress's **CYUSB3** driver. No admin rights needed.
+- **Linux / macOS**: `pip install pyusb` plus libusb. **Untested** -- written
+  against the protocol, not verified on non-Windows hardware. Linux needs usbfs
+  access, so either root or a udev rule:
+
+  ```
+  # /etc/udev/rules.d/99-dbk2jp.rules
+  SUBSYSTEM=="usb", ATTR{idVendor}=="04b4", ATTR{idProduct}=="1004", MODE="0666"
+  ```
+
+The public API is identical on both. Only the transport differs.
 
 Nothing is installed — put the `dbk2jp/` folder next to your script.
 
@@ -44,7 +53,9 @@ matters if you build commands yourself.
 
 | Module | What it holds |
 |---|---|
-| `dbk2jp/usb.py` | device discovery and the CYUSB3 IOCTL transport (`Board`) |
+| `dbk2jp/usb.py` | `Board`: discovery, command framing, backend selection |
+| `dbk2jp/_cyusb.py` | Windows backend -- CYUSB3.sys IOCTLs |
+| `dbk2jp/_libusb.py` | Linux/macOS backend -- pyusb bulk transfers (untested) |
 | `dbk2jp/protocol.py` | the 12-byte `tagSeaCMD` wire format, opcode constants, parameter packing |
 | `dbk2jp/unlock.py` | the 3-frame ATSHA204 replay that turns the 加密 LED green |
 | `dbk2jp/job.py` | the high-level API (`Job`) |
@@ -75,6 +86,11 @@ Board()                   # first board
 Board(index=1)            # second board
 Board(path=r"\\\\?\\usb#...")
 ```
+
+`usb.BACKEND` says which transport is active (`_cyusb` or `_libusb`), and
+`Board(backend=...)` forces one.
+
+### Windows only: the interface GUID
 
 **The interface GUID is not portable.** It comes from whichever `.inf` bound the
 board, not from the hardware. On the development machine one instance of

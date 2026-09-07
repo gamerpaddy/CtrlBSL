@@ -6,8 +6,13 @@ Drive a **BSL/SeaCAD DBK2JP** galvo laser marking controller directly from Pytho
 no proprietary or paid software needed. Talks to the stock Cypress **CYUSB3** driver over
 its IOCTLs, so the vendor software keeps working alongside it.
 
-Windows, Python 3.8+, no dependencies (`ctypes` + `winreg` only). Drop the
-`dbk2jp/` folder next to your script.
+Python 3.8+. Drop the `dbk2jp/` folder next to your script.
+
+- **Windows** — no dependencies; goes through the stock CYUSB3 driver.
+- **Linux / macOS** — needs `pip install pyusb`; plain libusb bulk transfers.
+  Untested, written against the protocol. Linux needs a udev rule or root.
+
+Same `Board` and `Job` on both; the platform difference is one backend module.
 
 Full reference: **[API.md](API.md)**
 
