@@ -452,6 +452,19 @@ in angle bunches them where the curve doubles back, which quantises badly once a
 chord drops near a single count, and it concentrates the dose by accident
 instead of by the pitch you set.
 
+**The wiggle belongs to a lit run, not to a segment.** The phase carries across
+the segments inside one run and the turn count is fractional, so how a caller
+chops a line into points does not change the cut: marking one 8192 count line
+gives 1.197x exposure and marking the same line as five segments gives 1.208x.
+Per-segment wiggling gave that same five-piece line a full circle per piece, and
+a run shorter than one pitch swung a full radius around a line a fraction of its
+length.
+
+The amplitude ramps up over the first turn of a run and back down over the last,
+so a cut starts and ends on the line rather than with a radial dart of one full
+radius. That costs a little exposure on runs only a few pitches long, which is
+why a short test segment reads 1.20x where the ideal figure is 1.21x.
+
 Timing follows the traced path: at a fixed `mm_s` a wiggled segment takes
 `exposure` times longer, which is the point. With `speed=` the duration you gave
 is split across the traced path instead, so the segment still takes what you
@@ -490,7 +503,10 @@ j.runup_mm(600)        # 0.900 mm to reach 600 mm/s at that acceleration
 ```
 
 `wiggle_load()` needs no limits to report the physics. `set_limits()` states what
-your machine will do, and `path()` then warns when a wiggle exceeds it. Nothing
+your machine will do, and `path()` then warns when a wiggle exceeds it, whether
+the speed came as `mm_s` or as a raw duration: with `speed=` the traced path is
+covered in the time the straight one was given, so the real feed rate is higher
+than it looks and the mirrors have it worse, not better. Nothing
 is assumed: with the limits unset, only the vector rate is checked, against the
 board's own measured ~33 000 vectors per second. Measure the other two by cutting
 test loops and watching where the corners start rounding.

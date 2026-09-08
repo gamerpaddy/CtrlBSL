@@ -495,39 +495,56 @@ class Job:
                 hi = mid - 1
         return best
 
-    def _wiggle(self, p0, p1, radius, pitch, steps):
-        """p0 -> p1 traced as small circles, to widen the burn.
+    def _wiggle(self, p0, p1, radius, pitch, steps, phase=0.0,
+                travelled=0.0, run_len=None):
+        """p0 -> p1 traced as circles around the line, to widen and deepen it.
 
-        The mark walks the straight line while orbiting it, so the lit area is
-        the line plus a circle of `radius` swept along it: a kerf about
-        2 * radius wide. `pitch` is how far along the line one full circle
-        advances, `steps` how many points make up each circle.
+        The mark walks the line while orbiting it, so the beam covers the cut
+        several times per millimetre of advance. `pitch` is how far one full
+        circle advances, `steps` how many points make up a circle.
 
-        The exact endpoints are kept at both ends, so joints stay where the
-        caller put them and only the middle is widened. Returns the points
-        after p0, p1 included, as floats so the resampling below stays exact;
-        path() rounds them to counts before timing and emitting.
+        The wiggle belongs to a whole lit run, not to one segment. `phase` is
+        where the previous segment left the circle and `travelled` how far into
+        the run this segment starts, so a run split into many short segments
+        gets one continuous spiral rather than a full loop per segment. With
+        `run_len` given the amplitude ramps from zero over the first turn and
+        back to zero over the last, which keeps the ends of the cut on the line
+        instead of starting with a radial dart of one radius.
+
+        Returns (points, phase), the points as floats. Falls back to a single
+        straight move when the segment is too short to carry any turn.
         """
         dx, dy = p1[0] - p0[0], p1[1] - p0[1]
         length = (dx * dx + dy * dy) ** 0.5
         if length == 0 or radius <= 0:
-            return [p1]
+            return [(float(p1[0]), float(p1[1]))], phase
         ux, uy = dx / length, dy / length
-        turns = max(1.0, length / float(pitch))
-        n = max(int(round(turns * steps)), steps)
+        turns = length / float(pitch)          # fractional: no forced full loop
+        n = max(2, int(round(turns * steps)))
+
+        def amp(d):
+            """Amplitude at distance `d` into the run."""
+            if not run_len:
+                return radius
+            ramp = min(float(pitch), run_len / 2.0)
+            if ramp <= 0:
+                return radius
+            head = min(1.0, d / ramp)
+            tail = min(1.0, max(0.0, run_len - d) / ramp)
+            return radius * min(head, tail)
 
         def at(f):
-            a = 2.0 * math.pi * turns * f
-            return (p0[0] + ux * length * f + radius * math.cos(a),
-                    p0[1] + uy * length * f + radius * math.sin(a))
+            d = travelled + length * f
+            a = phase + 2.0 * math.pi * turns * f
+            r = amp(d)
+            return (p0[0] + ux * length * f + r * math.cos(a),
+                    p0[1] + uy * length * f + r * math.sin(a))
 
         # Sampling the loop at even parameter steps bunches the points where the
-        # curve doubles back on itself: with a radius near the pitch, one step
-        # covers a couple of counts and the next covers fifty, so the exposure
-        # is uneven and the short chords quantise badly. Resample by arc length
-        # instead, which is what makes every sub-segment the same length and
-        # therefore the same duration.
-        dense = max(n * 8, 512)
+        # curve doubles back on itself: one step covers a couple of counts and
+        # the next covers fifty, which quantises badly and sets the dose by
+        # accident rather than by the pitch. Resample by arc length instead.
+        dense = max(n * 8, 64)
         pts = [at(i / float(dense)) for i in range(dense + 1)]
         acc, cum = 0.0, [0.0]
         for a, b in zip(pts, pts[1:]):
@@ -545,8 +562,8 @@ class Job:
             ax, ay = pts[j]
             bx, by = pts[j + 1]
             out.append((ax + (bx - ax) * t, ay + (by - ay) * t))
-        out[-1] = (float(p1[0]), float(p1[1]))     # land exactly on the end
-        return out                                 # floats: see path()
+        out[-1] = at(1.0)                      # exact phase at the joint
+        return out, phase + 2.0 * math.pi * turns
 
     def set_limits(self, max_mm_s=None, max_accel_mm_s2=None,
                    max_loop_hz=None):
@@ -615,6 +632,20 @@ class Job:
                         % (out["vectors_per_s"], 1.0 / SEG_MIN))
         out["exceeded"] = over
         return out
+
+    def _warn_wiggle_load(self, wig, pitch, steps, mm_s):
+        """Warn when a wiggle asks for motion the machine will not produce."""
+        load = self.wiggle_load(wig * self.field.mm_per_count,
+                                pitch * self.field.mm_per_count, mm_s, steps)
+        if load["exceeded"]:
+            warnings.warn(
+                "wiggle asks for %.0f loops/s and %.3g mm/s^2 (%.0f g) of "
+                "lateral acceleration at %.0f mm/s: %s. The mirrors will round "
+                "the loops off and the exposure will bunch at the turns instead "
+                "of spreading along the cut."
+                % (load["loop_hz"], load["accel_mm_s2"], load["accel_g"], mm_s,
+                   "; ".join(load["exceeded"])), stacklevel=3)
+        return True
 
     def runup_mm(self, mm_s, accel_mm_s2=None):
         """Run-up length that actually reaches `mm_s`, as v^2 / 2a.
@@ -724,22 +755,36 @@ class Job:
             if int(wiggle_steps) < 4:
                 raise ValueError("wiggle_steps must be at least 4")
             if mm_s:
-                load = self.wiggle_load(wig * self.field.mm_per_count,
-                                        wiggle_pitch * self.field.mm_per_count,
-                                        mm_s, wiggle_steps)
-                if load["exceeded"]:
-                    warnings.warn(
-                        "wiggle asks for %.0f loops/s and %.3g mm/s^2 (%.0f g) "
-                        "of lateral acceleration: %s. The mirrors will round "
-                        "the loops off and the exposure will bunch at the "
-                        "turns instead of spreading along the cut."
-                        % (load["loop_hz"], load["accel_mm_s2"],
-                           load["accel_g"], "; ".join(load["exceeded"])),
-                        stacklevel=2)
+                self._warn_wiggle_load(wig, wiggle_pitch, wiggle_steps, mm_s)
+
+        # A wiggle belongs to a lit run, so measure the runs first: their total
+        # length drives the amplitude ramp, and the phase has to carry across
+        # the segments inside one. Without this a polyline of short segments
+        # gets a full circle per segment, which is a different cut entirely.
+        run_len, run_at = [0.0] * len(flags), [0.0] * len(flags)
+        i = 0
+        while i < len(flags):
+            if not flags[i]:
+                i += 1
+                continue
+            k, acc = i, []
+            while k < len(flags) and flags[k]:
+                d = ((pts[k + 1][0] - pts[k][0]) ** 2 +
+                     (pts[k + 1][1] - pts[k][1]) ** 2) ** 0.5
+                acc.append(d)
+                k += 1
+            total_run, walked = sum(acc), 0.0
+            for m, d in enumerate(acc):
+                run_len[i + m] = total_run
+                run_at[i + m] = walked
+                walked += d
+            i = k
 
         granted = over
         cmds = []
         at = None
+        phase = 0.0
+        warned = False
         straight = 0.0        # lit length as asked for, mm
         lit_path = 0.0        # lit length actually traced, mm
         for i, on in enumerate(flags):
@@ -762,8 +807,13 @@ class Job:
                 at = p0
 
             if on and wig:
-                curve = self._wiggle(p0, p1, wig, wiggle_pitch,
-                                     int(wiggle_steps))
+                if starts_run:
+                    phase = 0.0
+                curve, phase = self._wiggle(p0, p1, wig, wiggle_pitch,
+                                            int(wiggle_steps), phase,
+                                            run_at[i], run_len[i])
+                if ends_run:
+                    curve[-1] = (float(p1[0]), float(p1[1]))
                 chain = [(int(round(x)), int(round(y))) for x, y in curve]
                 self._require_in_field(chain, "wiggle point")
                 # Time the rounded points, not the ideal curve: those integers
@@ -785,8 +835,17 @@ class Job:
                     # that ends a lit run carries the laser-off delay.
                     p4 = delay if (k == last and ends_run) else 0
                     cmds.append((S.cmd(0x0243, sub, bx, by, 0, p4), sub))
-                straight += self._len_mm(p0, p1)
-                lit_path += sum(self._len_mm(a, b) for a, b in pairs)
+                seg_straight = self._len_mm(p0, p1)
+                seg_traced = sum(self._len_mm(a, b) for a, b in pairs)
+                straight += seg_straight
+                lit_path += seg_traced
+                if speed is not None and not warned and seg_straight:
+                    # With a raw duration the traced path is covered in the time
+                    # the straight one was given, so the real feed is higher
+                    # than it looks and the mirrors have it worse, not better.
+                    warned = self._warn_wiggle_load(
+                        wig, wiggle_pitch, wiggle_steps,
+                        seg_traced / (sum(subs) * 1e-6))
             elif on:
                 us = self._duration(p0, p1, speed, mm_s)
                 p4 = delay if ends_run else corner_delay
