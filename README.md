@@ -217,3 +217,13 @@ pulsing after the job ends.
 ## License
 
 [WTFPL](LICENSE). Do whatever the fuck you want with it.
+
+## The Rust port
+
+This branch carries `rust/`, the same driver in Rust with PyO3 bindings, so
+Python keeps working while the core gains typed units and a `Drop` that
+silences the laser on every path out of a scope. `cargo test` runs 22 offline
+checks with no hardware. See [rust/README.md](rust/README.md).
+
+The Python package in `dbk2jp/` stays here as the reference implementation and
+still runs; the two agree frame for frame.

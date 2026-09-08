@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "dbk2jp-rs"
+version = "1.0.0"
+description = "Drive a BSL/SeaCAD DBK2JP galvo laser controller over USB, with no vendor software"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "WTFPL" }
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+]
+
+[project.urls]
+Repository = "https://github.com/gamerpaddy/CtrlBSL"
+
+[tool.maturin]
+module-name = "dbk2jp_rs"
+features = ["pyo3/extension-module", "python"]
