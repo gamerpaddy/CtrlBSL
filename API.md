@@ -249,8 +249,8 @@ See EXAMPLES.md.
 | `configure(...)` / `select(...)` / `settings()` | laser setup, above |
 | `power_byte(value, freq_khz)` | write the fiber P0-P7 word immediately, outside a job |
 | `tick(freq_khz, width_us, enable)` / `tick_off()` | CO2 tickle shape. Either argument may be omitted to keep the current value. Returns `(actual_hz, width_ticks, duty_pct)`. **Free-running** - survives job end *and host exit* |
-| `begin(start, speed)` / `lines(points, speed)` | lit vector streaming |
-| `jump(x, y, speed, delay)` | unlit move. `0x8000` is centre, span `0x0000`-`0xFFFF` |
+| `begin(start, speed)` / `lines(points, speed)` | lit vector streaming. `speed` is the per-segment **duration in microseconds**, see below |
+| `jump(x, y, speed, delay)` | unlit move. `0x8000` is centre, span `0x0000`-`0xFFFF`. `speed` is a duration, `delay` a settle time, both microseconds |
 | `pwm_burst(seconds, ...)` | sustained PWM for scope work, paced off `free_cache()` |
 | `red_light(on)` | pilot pointer, CON3 pin 22 |
 | `mo(on)` | enable MO and PA, `0x0211` Param1 bit 8 |
@@ -296,6 +296,45 @@ but changing it leaves all of this where it is.
 `pwm_burst` is closed-loop against the board's own counter. Open-loop pacing
 drains the queue between chunks and the output visibly drops to tickle-only
 about once a second.
+
+### Vector timing: `speed` is a duration in microseconds
+
+Param0 of `0x0241` and `0x0243` is the time the board takes over that one
+segment, in microseconds. The board interpolates the whole move itself, so a
+fixed Param0 gives a different feed rate on every segment length:
+
+```
+mm_per_s   = length_mm / (Param0 * 1e-6)
+Param0_us  = length_mm / mm_per_s * 1e6
+```
+
+Established from vendor USB captures of LightBurn marking known rectangles.
+A 4 x 3 mm rectangle at 2000 mm/s on a 90.1 mm lens sent Param0 = 1000 for its
+2.000 mm halves and 750 for its 1.500 mm halves, so both resolve to 2000 mm/s.
+The same rectangle at 1337 mm/s on a 110 mm lens sent 1495 for 2.001 mm and
+1121 for 1.500 mm, which resolve to 1338 and 1337 mm/s. Jumps follow the identical rule: framing moves came out at
+100 mm/s, positioning jumps at 8035 mm/s against a jump speed setting of 8000.
+
+The `speed=` arguments on `begin()`, `lines()`, `jump()` and their `_mm`
+variants are this raw Param0, so they are durations, not rates. Passing one
+number for a run of unequal segments paints them at unequal speeds.
+
+Param4 of the same commands is a delay in microseconds applied at the end point,
+and the vendor software uses it for its four timing controls:
+
+| Param4 site | LightBurn control |
+|---|---|
+| every polygon corner of a lit run | polygon TC |
+| last vector of a shape | laser off TC |
+| a zero-length `0x0241` placed before the first mark | jump delay |
+
+Laser on TC is separate: it rides in `0x0208` Param1, once per job header.
+End TC, max jump delay and jump distance limit never appear on the wire at all.
+The vendor host folds them into the Param4 numbers it emits, so a driver that
+wants that behaviour has to compute it the same way.
+
+`0x0211` Param2 sat at 8000 across captures with different speeds and lenses,
+so it carries no per-job speed.
 
 ---
 
@@ -452,6 +491,8 @@ behaviour.
 - **EP 0x02 overrun clears the ready bit.** `ucPara0` drops to `0x0e` and the
   board needs re-arming. Pace against `free_cache()`.
 - **Pausing with `0x0125`** also takes `ucPara0` to `0x0e`.
+- **`speed=` is a duration in microseconds**, so one value across segments of
+  different length paints them at different feed rates. See Vector timing.
 
 ## MOPA pulse width
 
