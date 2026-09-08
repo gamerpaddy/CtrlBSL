@@ -289,7 +289,7 @@ See EXAMPLES.md.
 | `power_byte(value, freq_khz)` | write the fiber P0-P7 word immediately, outside a job |
 | `tick(freq_khz, width_us, enable)` / `tick_off()` | CO2 tickle shape. Either argument may be omitted to keep the current value. Returns `(actual_hz, width_ticks, duty_pct)`. **Free-running** - survives job end *and host exit* |
 | `begin(start, speed)` / `lines(points, speed)` | lit vector streaming. `speed` is the per-segment **duration in microseconds**, see below |
-| `path(points, lit=..., mm_s=...)` | one position stream, laser gated per segment, with optional run-up and wiggle |
+| `path(points, lit=..., mm_s=...)` | one position stream, laser gated per segment, with run-up, wiggle and dwell placement |
 | `segments(segs, ...)` | disjoint segments in one batch |
 | `dots(points, dwell_us)` | point marking. **UNTESTED** |
 | `path_mm` / `segments_mm` / `dots_mm` | the same in millimetres |
@@ -424,34 +424,42 @@ limits is shortened to the longest one that fits, and the granted length comes
 back in the return value, so marking near an edge still happens with whatever
 acceleration distance is available.
 
-**Wiggle** widens the burn by orbiting the line while walking it, so the lit
-area is the line swept by a circle:
+**Wiggle** orbits the line while walking it, so the beam covers the same cut
+several times per millimetre of advance. It is there to concentrate exposure for
+cutting rather than to draw a wider line, and the widening is a side effect of
+the orbit:
 
 ```python
-j.path(pts, mm_s=600, wiggle=60, wiggle_pitch=400)       # counts
-j.segments_mm(segs, mm_s=600, wiggle_mm=0.1, wiggle_pitch_mm=0.6)
+r = j.path(pts, mm_s=600, wiggle=60, wiggle_pitch=120)
+r["exposure"]      # 3.20 -> the beam traces 3.2 mm of path per mm of cut
 ```
 
 `wiggle` is the circle radius, `wiggle_pitch` how far along the line one full
 circle advances, `wiggle_steps` how many points make up a circle (16 by
-default). The kerf comes out about `2 * wiggle` wide: a 60 count radius on a
-110 mm field measured 120 counts, 0.20 mm, across the traced path. Only lit
-segments are wiggled; unlit ones stay single jumps.
+default). Pitch is the dose control: at radius 60 counts, a pitch of 400 gives
+1.21x exposure and a pitch of 120 gives 3.20x, on the same geometry at the same
+feed rate. Tightening the pitch multiplies dwell without touching power or
+speed. The kerf comes out about `2 * wiggle` wide.
+
+`exposure` in the return value is the traced lit length over the straight lit
+length, so it is the multiplier on both dwell and job time. Only lit segments
+are wiggled; unlit ones stay traverses.
 
 Points are spaced by arc length rather than by angle. Sampling the loop evenly
-in angle bunches them where the curve doubles back, which both burns unevenly
-and quantises badly once a chord drops near a single count.
+in angle bunches them where the curve doubles back, which quantises badly once a
+chord drops near a single count, and it concentrates the dose by accident
+instead of by the pitch you set.
 
-Timing follows the real traced path, which is longer than the straight line: at
-a fixed `mm_s` a wiggled segment takes proportionally longer (1.21x for the
-numbers above), while with `speed=` the duration you gave is split across the
-traced path so the segment still takes what you asked. Durations are computed
-from the rounded, integer-count points, since those are the only positions the
-board ever moves between.
+Timing follows the traced path: at a fixed `mm_s` a wiggled segment takes
+`exposure` times longer, which is the point. With `speed=` the duration you gave
+is split across the traced path instead, so the segment still takes what you
+asked and the extra coverage comes out of dwell per point rather than total
+time.
 
 Bounds apply to the widened path too: a circle that would leave the field raises
 rather than being flattened against the edge, and the message names the offending
-wiggle point.
+wiggle point. A radius or pitch given in millimetres that rounds to less than one
+galvo count warns rather than quietly marking a plain line.
 
 ```python
 r = j.segments_mm([((-10, 0), (10, 0))], mm_s=1500, overshoot_mm=0.5)
@@ -460,8 +468,21 @@ r = j.segments_mm([((-10, 0), (10, 0))], mm_s=1500, overshoot_mm=0.5)
 
 The geometry itself is bounds-checked before anything is written, so a point
 outside the travel limits raises rather than clipping mid-stream. All three
-return `{"commands", "us", "overshoot"}`, where `us` is the summed duration the
-board should take, which is also what the host paces against.
+return `{"commands", "us", "overshoot", "exposure"}`, where `us` is the summed
+duration the board should take, which is also what the host paces against.
+
+Unlit segments travel at `jump_speed`. Timing them at the marking rate instead
+spends every traverse at cutting speed, which is 33 ms of darkness for a 20 mm
+gap at 600 mm/s; pass `unlit_at_feed=True` where the slow dark move is
+deliberate.
+
+**Dwell placement.** Param4 is a dwell at the end point, and it goes only on the
+vector that ends a lit run, which is where both vendor hosts put it. Interior
+vertices take `corner_delay`, 0 by default. Spending the laser-off delay at
+every point instead costs half a millisecond per vector: on one wiggled segment
+of 328 vectors that is 164 ms of standing still, most of the job. `lines()`
+keeps its historical 500 on every point for compatibility and now takes
+`delay=` so callers can set it.
 
 ### EP 0x84 acknowledges every EP 0x02 write
 

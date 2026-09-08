@@ -29,7 +29,8 @@ from .laser import CO2, FIBER, UV, GREEN, MOPA, YAG, LASERS, Laser
 # Raw type codes, kept for callers that had them hardcoded. Prefer the names.
 LASER_CO2, LASER_FIBER, LASER_UV, LASER_GREEN, LASER_MOPA = 0x22, 0x11, 0x33, 0x44, 0x55
 
-SEG_TIME = 0.00083          # measured cost of one lit segment, seconds
+SEG_TIME = 0.00083          # conservative per-segment cost, seconds
+SEG_MIN = 0.00003           # measured floor: ~32 800 segments/s with pacing
 MAX_SEGS = 1400             # per EP 0x02 transfer (flush limit is 1920)
 CENTRE = 0x8000
 
@@ -389,7 +390,7 @@ class Job:
         self._live = True
         self.b.write_data(blob)
 
-    def lines(self, points, speed=200):
+    def lines(self, points, speed=200, delay=500):
         """Emit lit (laser-on) vectors through `points`, paced to the board.
 
         `speed` is the per-segment duration in microseconds (see jump()), so the
@@ -397,11 +398,18 @@ class Job:
         write takes, and pacing on a fixed per-segment cost alone overruns the
         queue and leaves the board in the stuck 0x0e state. Sleep on whichever
         is larger, the commanded duration or the measured host cost.
+
+        `delay` is Param4, a dwell in microseconds at each point. It defaults to
+        500 for compatibility with everything that was measured through this
+        method, but a run of vectors wants 0 at the interior points: the vendor
+        hosts spend it only where a lit run ends. path() does that placement
+        itself.
         """
         per_seg = max(SEG_TIME, speed * 1e-6)
         for i in range(0, len(points), MAX_SEGS):
             chunk = points[i:i + MAX_SEGS]
-            blob = b"".join(S.cmd(0x0243, speed, x, y, 0, 500) for x, y in chunk)
+            blob = b"".join(S.cmd(0x0243, speed, x, y, 0, delay)
+                            for x, y in chunk)
             self.b.write_data(blob)
             time.sleep(len(chunk) * per_seg * 0.92)
 
@@ -536,20 +544,29 @@ class Job:
         return out                                 # floats: see path()
 
     def _emit(self, cmds):
-        """Write batched commands, chunked and paced against their durations."""
+        """Write batched commands, chunked and paced against their durations.
+
+        The floor here is the measured host throughput, ~30 us per command, not
+        the conservative 0.83 ms `lines()` uses. These callers know exactly how
+        long the board will take because they built every Param0, so the sum is
+        the real pace; holding a wiggle of eight thousand short vectors at
+        0.83 ms each would sleep about twenty-five times longer than the job
+        runs.
+        """
         total = 0
         for i in range(0, len(cmds), MAX_SEGS):
             chunk = cmds[i:i + MAX_SEGS]
             us = sum(d for _, d in chunk)
             total += us
             self.b.write_data(b"".join(c for c, _ in chunk))
-            time.sleep(max(len(chunk) * SEG_TIME, us * 1e-6) * 0.92)
+            time.sleep(max(len(chunk) * SEG_MIN, us * 1e-6) * 0.92)
         self._live = True
         return total
 
     def path(self, points, lit=None, speed=None, mm_s=None,
              jump_speed=0x2710, jump_delay=0x01F4, overshoot=0, delay=500,
-             wiggle=0, wiggle_pitch=None, wiggle_steps=16):
+             wiggle=0, wiggle_pitch=None, wiggle_steps=16,
+             unlit_at_feed=False, corner_delay=0):
         """Stream a run of points with the laser on or off per segment.
 
         `points` is a list of (x, y) in counts. `lit` is one boolean per
@@ -557,6 +574,10 @@ class Job:
         lit and `0x0241` when not. All lit if `lit` is omitted. That gates the
         laser inside one continuous position stream instead of one call per
         piece, and the whole run goes out in MAX_SEGS-sized writes.
+
+        Unlit segments travel at `jump_speed`, since they are traverses between
+        pieces of work. `unlit_at_feed=True` runs them at the marking rate
+        instead, for the rare case where the slow dark move is deliberate.
 
         `overshoot` is a laser-off run-up in counts, added before the first
         segment of each lit run and after the last, along that segment's own
@@ -567,6 +588,13 @@ class Job:
         Speed: pass `speed` for a raw Param0 duration, or `mm_s` for a feed
         rate converted per segment. The run-up and run-out move at the same
         rate as the segment they belong to.
+
+        `delay` is the laser-off dwell in microseconds, and it goes only on the
+        vector that ends a lit run, which is where both vendor hosts put it.
+        Interior vertices get `corner_delay` (0 by default; the vendors use tens
+        of microseconds there). Paying the off-delay at every point instead
+        would add half a millisecond of dwell per vector, which on a wiggled
+        segment of a few hundred vectors is most of the job.
 
         `wiggle` widens the burn: each lit segment is traced as small circles of
         that radius in counts, advancing `wiggle_pitch` counts per turn, at
@@ -581,7 +609,9 @@ class Job:
         includes the wiggle: a circle that would leave the field raises rather
         than being flattened against the edge.
 
-        Returns {"commands", "us", "overshoot"}.
+        Returns {"commands", "us", "overshoot", "exposure"}, where `exposure`
+        is the traced lit length over the straight lit length: how many times
+        the beam covers the cut line, which is what a wiggle is bought for.
         """
         pts = [(int(x), int(y)) for x, y in points]
         if len(pts) < 2:
@@ -603,6 +633,8 @@ class Job:
         granted = over
         cmds = []
         at = None
+        straight = 0.0        # lit length as asked for, mm
+        lit_path = 0.0        # lit length actually traced, mm
         for i, on in enumerate(flags):
             p0, p1 = pts[i], pts[i + 1]
             starts_run = on and (i == 0 or not flags[i - 1])
@@ -639,12 +671,31 @@ class Job:
                     lens = [self._len_mm(a, b) for a, b in pairs]
                     tot = sum(lens) or 1.0
                     subs = [max(1, int(round(speed * L / tot))) for L in lens]
-                for (bx, by), sub in zip(chain, subs):
-                    cmds.append((S.cmd(0x0243, sub, bx, by, 0, delay), sub))
-            else:
+                last = len(chain) - 1
+                for k, ((bx, by), sub) in enumerate(zip(chain, subs)):
+                    # Param4 is a dwell at the end point. Inside a wiggle every
+                    # point is an interior point, so it stays 0; only the vector
+                    # that ends a lit run carries the laser-off delay.
+                    p4 = delay if (k == last and ends_run) else 0
+                    cmds.append((S.cmd(0x0243, sub, bx, by, 0, p4), sub))
+                straight += self._len_mm(p0, p1)
+                lit_path += sum(self._len_mm(a, b) for a, b in pairs)
+            elif on:
                 us = self._duration(p0, p1, speed, mm_s)
-                cmds.append((S.cmd(0x0243 if on else 0x0241, us, p1[0], p1[1],
-                                   0, delay if on else 0), us))
+                p4 = delay if ends_run else corner_delay
+                cmds.append((S.cmd(0x0243, us, p1[0], p1[1], 0, p4), us))
+                straight += self._len_mm(p0, p1)
+                lit_path += self._len_mm(p0, p1)
+            else:
+                # An unlit leg is a move between two pieces of work, so it runs
+                # at jump speed. Timing it at the marking feed rate instead
+                # spends the whole traverse at cutting speed: 20 mm at 600 mm/s
+                # is 33 ms of nothing, per gap. Pass unlit_at_feed=True when the
+                # controlled slow move is the point.
+                us = (self._duration(p0, p1, speed, mm_s) if unlit_at_feed
+                      else max(1, int(jump_speed)))
+                cmds.append((S.cmd(0x0241, us, p1[0], p1[1], 0,
+                                   0 if unlit_at_feed else jump_delay), us))
             at = p1
 
             if ends_run and over:
@@ -657,11 +708,13 @@ class Job:
 
         total = self._emit(cmds)
         return {"commands": len(cmds), "us": total,
-                "overshoot": granted if over else 0}
+                "overshoot": granted if over else 0,
+                "exposure": (lit_path / straight) if straight else 1.0}
 
     def segments(self, segs, speed=None, mm_s=None, jump_speed=0x2710,
                  jump_delay=0x01F4, overshoot=0, delay=500,
-                 wiggle=0, wiggle_pitch=None, wiggle_steps=16):
+                 wiggle=0, wiggle_pitch=None, wiggle_steps=16,
+                 unlit_at_feed=False, corner_delay=0):
         """Mark disjoint segments: an iterable of ((x0, y0), (x1, y1)) in counts.
 
         Each segment gets its own jump, run-up and run-out, and the lot travels
@@ -682,7 +735,9 @@ class Job:
         return self.path(pts, lit=flags, speed=speed, mm_s=mm_s,
                          jump_speed=jump_speed, jump_delay=jump_delay,
                          overshoot=overshoot, delay=delay, wiggle=wiggle,
-                         wiggle_pitch=wiggle_pitch, wiggle_steps=wiggle_steps)
+                         wiggle_pitch=wiggle_pitch, wiggle_steps=wiggle_steps,
+                         unlit_at_feed=unlit_at_feed,
+                         corner_delay=corner_delay)
 
     def dots(self, points, dwell_us, jump_speed=0x2710, jump_delay=0x01F4):
         """Point marking: jump to each point and fire for `dwell_us`. UNTESTED.
@@ -700,19 +755,34 @@ class Job:
                          jump_speed))
             cmds.append((S.cmd(0x0243, dwell, x, y, 0, 0), dwell))
         total = self._emit(cmds)
-        return {"commands": len(cmds), "us": total, "overshoot": 0}
+        return {"commands": len(cmds), "us": total, "overshoot": 0,
+                "exposure": 1.0}
 
-    def _counts(self, mm):
-        """Millimetres to a count distance, for radii and spacings."""
-        return int(round(float(mm) / self.field.mm_per_count)) if mm else 0
+    def _counts(self, mm, what=None):
+        """Millimetres to a count distance, for radii and spacings.
+
+        Warns when a non-zero request rounds to nothing: silently dropping a
+        wiggle turns a cut into a scratch, and the caller would only find out
+        from the workpiece.
+        """
+        if not mm:
+            return 0
+        n = int(round(float(mm) / self.field.mm_per_count))
+        if n == 0 and what:
+            warnings.warn("%s of %g mm is under one galvo count on a %g mm "
+                          "field, so it is ignored"
+                          % (what, mm, self.field.size_mm), stacklevel=3)
+        return n
 
     def path_mm(self, points_mm, lit=None, overshoot_mm=0.0, wiggle_mm=0.0,
                 wiggle_pitch_mm=0.0, clamp=False, **kw):
         """path() with points, run-up and wiggle in millimetres."""
         pts = [self.mm(x, y, clamp) for x, y in points_mm]
-        return self.path(pts, lit=lit, overshoot=self._counts(overshoot_mm),
-                         wiggle=self._counts(wiggle_mm),
-                         wiggle_pitch=self._counts(wiggle_pitch_mm) or None,
+        return self.path(pts, lit=lit,
+                         overshoot=self._counts(overshoot_mm, "run-up"),
+                         wiggle=self._counts(wiggle_mm, "wiggle radius"),
+                         wiggle_pitch=self._counts(wiggle_pitch_mm,
+                                                   "wiggle pitch") or None,
                          **kw)
 
     def segments_mm(self, segs_mm, overshoot_mm=0.0, wiggle_mm=0.0,
@@ -720,9 +790,11 @@ class Job:
         """segments() with points, run-up and wiggle in millimetres."""
         segs = [(self.mm(a[0], a[1], clamp), self.mm(b[0], b[1], clamp))
                 for a, b in segs_mm]
-        return self.segments(segs, overshoot=self._counts(overshoot_mm),
-                             wiggle=self._counts(wiggle_mm),
-                             wiggle_pitch=self._counts(wiggle_pitch_mm) or None,
+        return self.segments(segs,
+                             overshoot=self._counts(overshoot_mm, "run-up"),
+                             wiggle=self._counts(wiggle_mm, "wiggle radius"),
+                             wiggle_pitch=self._counts(wiggle_pitch_mm,
+                                                       "wiggle pitch") or None,
                              **kw)
 
     def dots_mm(self, points_mm, dwell_us, clamp=False, **kw):
