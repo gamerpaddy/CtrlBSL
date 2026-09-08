@@ -4,8 +4,17 @@ Runnable snippets for the DBK2JP. Every one of these was executed against a real
 board; what varies is whether a laser of that type was attached to confirm the
 optical side. See [API.md](API.md) for the full surface.
 
+These use the reference Python package, `dbk2jp`. The same calls work against
+the Rust extension, `dbk2jp_rs`, with two differences: the laser is a string, so
+`Job(CO2)` becomes `Job(laser="co2")`, and warnings arrive from `j.warnings()`
+rather than the `warnings` module. The Rust API itself is in
+[rust/README.md](rust/README.md).
+
 Coordinates are 16-bit. `0x8000` is field centre, `0x0000` and `0xFFFF` are the
-corners. `speed` is the galvo rate for that move.
+corners. **`speed` is the time the board takes over one segment, in
+microseconds, not a rate**: a fixed value across segments of different length
+paints them at different speeds. `path(..., mm_s=)` converts a feed rate per
+segment instead, which is what you want for anything but a single move.
 
 - [CO2](#co2)
 - [Fiber](#fiber)
@@ -31,10 +40,23 @@ with Job(CO2) as j:
     j.configure(freq_khz=20, power_pct=40)      # 20 kHz, 40% duty
                                                 # tickle already on, 5 kHz / 1 us
     j.begin(start=(0x4000, 0x4000), speed=300)
-    j.lines([(0xC000, 0x4000),
-             (0xC000, 0xC000),
-             (0x4000, 0xC000),
-             (0x4000, 0x4000)], speed=300)
+    j.path([(0x4000, 0x4000),                   # a feed rate, so every side
+            (0xC000, 0x4000),                   # runs at the same speed
+            (0xC000, 0xC000),
+            (0x4000, 0xC000),
+            (0x4000, 0x4000)], mm_s=600)
+```
+
+The same against the Rust extension:
+
+```python
+import dbk2jp_rs as d
+
+with d.Job(laser="co2") as j:
+    j.configure(freq_khz=20, power_pct=40)
+    j.begin(start=(0x4000, 0x4000), speed=300)
+    j.path([(0x4000, 0x4000), (0xC000, 0x4000), (0xC000, 0xC000),
+            (0x4000, 0xC000), (0x4000, 0x4000)], mm_s=600)
 ```
 
 ### Tickle

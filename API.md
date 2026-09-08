@@ -1,5 +1,27 @@
 # `dbk2jp` - API reference
 
+This documents the driver, not one language's spelling of it. The
+implementation is the Rust crate in `rust/`; `dbk2jp_rs` is its Python
+extension, and `dbk2jp/` is the original Python package kept as a reference.
+Everything about the protocol, the measurements and the hardware behaviour
+below applies to all three.
+
+Where a name differs, the mapping is:
+
+| Rust | Python (`dbk2jp_rs`) | Reference package (`dbk2jp`) |
+|---|---|---|
+| `Job::new(board, "co2", field)` | `Job(laser="co2", field=...)` | `Job(CO2, field=...)` |
+| `Speed::Micros(1000)` | `speed=1000` | `speed=1000` |
+| `Speed::MmPerSec(600.0)` | `mm_s=600` | `mm_s=600` |
+| `PathOpts { wiggle, .. }` | keyword arguments | keyword arguments |
+| `Result<T, String>` | raises `ValueError` | raises `ValueError` |
+| `job.warnings` | `j.warnings()` | Python `warnings` module |
+| `Drop` silences the laser | `close()` / `with` | `close()` / `atexit` |
+
+Rust returns errors rather than raising, and carries warnings on the `Job` for
+the caller to read, since it has no warnings module. Everything else lines up
+one to one.
+
 Drive a BSL/SeaCAD **DBK2JP** galvo laser controller directly over USB, with no
 proprietary or paid software.
 
@@ -10,10 +32,15 @@ per laser type, see [EXAMPLES.md](EXAMPLES.md).
 
 ## Requirements
 
-- Python 3.8+.
-- **Windows**: no third-party packages (`ctypes` + `winreg`), and the board bound
-  to Cypress's **CYUSB3** driver. No admin rights needed.
-- **Linux**: `pip install pyusb` plus libusb. Verified on hardware:
+- **Rust**: 1.70+, and nothing else on Windows: the Win32 calls are declared
+  inline, so `cargo build` fetches no crates at all. Linux and macOS build with
+  `--features libusb`. `--features python` adds PyO3 for the extension module.
+- **Python**: 3.8+. `dbk2jp_rs` is the compiled extension, built with
+  `maturin develop --release`; the `dbk2jp/` package needs no build step.
+- **Windows**: no third-party packages either way (`ctypes` + `winreg` in
+  Python), and the board bound to Cypress's **CYUSB3** driver. No admin rights.
+- **Linux**: `pip install pyusb` for the Python package, libusb for both.
+  Verified on hardware:
   enumeration, unlock, status and marking. macOS uses the same backend and is
   still to be tried. Linux needs usbfs access, so either root or a udev rule:
 
@@ -31,16 +58,25 @@ marks and a second that stays silent. The backend clears the halts on
 open and on close, the open side also covering a process that was killed before
 it could clean up.
 
-Zero install: put the `dbk2jp/` folder next to your script.
+```rust
+use dbk2jp_rs::{Board, Job};
+
+let mut j = Job::new(Board::open(0)?, "co2", None)?;
+j.ensure_unlocked(2);
+j.configure(Some(20.0), Some(50.0), None, None, None, None)?;
+j.jump(0x4000, 0x8000, 0x2710, 0x01F4)?;
+```
 
 ```python
-from dbk2jp import Job
+import dbk2jp_rs as d
 
-with Job() as j:                    # opens, unlocks, leaves the board armed
+with d.Job() as j:                  # opens, unlocks, leaves the board armed
     j.configure(freq_khz=20, power_pct=50)
     j.jump(0x4000, 0x8000)
-    j.pwm_burst(seconds=5)
 ```
+
+The reference Python package needs no build at all: put the `dbk2jp/` folder
+next to your script and `from dbk2jp import Job`.
 
 ---
 
@@ -58,17 +94,22 @@ matters if you build commands yourself.
 
 ## Layout
 
-| Module | What it holds |
-|---|---|
-| `dbk2jp/usb.py` | `Board`: discovery, command framing, backend selection |
-| `dbk2jp/_cyusb.py` | Windows backend -- CYUSB3.sys IOCTLs |
-| `dbk2jp/_libusb.py` | Linux/macOS backend -- pyusb bulk transfers, verified on Linux |
-| `dbk2jp/protocol.py` | the 12-byte `tagSeaCMD` wire format, opcode constants, parameter packing |
-| `dbk2jp/unlock.py` | the 3-frame ATSHA204 replay that turns the 加密 LED green |
-| `dbk2jp/field.py` | millimetres to galvo counts (`Field`), `markcfg0` reader |
-| `dbk2jp/cor.py` | `.cor` optical correction (scaffold, format not recovered) |
-| `dbk2jp/job.py` | the high-level API (`Job`) |
-| `dbk2jp/__main__.py` | `python -m dbk2jp …` |
+| Rust | Python | What it holds |
+|---|---|---|
+| `rust/src/usb.rs` | `dbk2jp/usb.py` | `Board`: discovery, command framing, backend selection |
+| `rust/src/backend_win.rs` | `dbk2jp/_cyusb.py` | Windows backend -- CYUSB3.sys IOCTLs |
+| `rust/src/backend_libusb.rs` | `dbk2jp/_libusb.py` | Linux/macOS backend -- bulk transfers, verified on Linux |
+| `rust/src/protocol.rs` | `dbk2jp/protocol.py` | the 12-byte `tagSeaCMD` wire format, opcode constants, parameter packing |
+| `rust/src/unlock.rs` | `dbk2jp/unlock.py` | the 3-frame ATSHA204 replay that turns the 加密 LED green |
+| `rust/src/field.rs` | `dbk2jp/field.py` | millimetres to galvo counts (`Field`), `markcfg0` reader |
+| `rust/src/laser.rs` | `dbk2jp/laser.py` | laser types and how each one is driven |
+| -- | `dbk2jp/cor.py` | `.cor` optical correction (scaffold, format not recovered) |
+| `rust/src/job.rs` | `dbk2jp/job.py` | the high-level API (`Job`) |
+| `rust/src/python.rs` | -- | the PyO3 wrapper, the only file that knows about Python |
+| `rust/tests/streaming.rs` | -- | geometry and timing against a fake transport |
+| -- | `dbk2jp/__main__.py` | `python -m dbk2jp …` |
+
+`.cor` parsing and the command line live only in the Python package so far.
 
 ---
 
@@ -89,16 +130,23 @@ python -m dbk2jp field [path] [key=value ...]   # scan field, creates if missing
 ## Device discovery
 
 ```python
-from dbk2jp import find_devices, Board
+import dbk2jp_rs as d
 
-find_devices()            # -> ['\\\\?\\usb#vid_04b4&pid_1004#...']
-Board()                   # first board
-Board(index=1)            # second board
-Board(path=r"\\\\?\\usb#...")
+d.find_devices()          # -> ['\\\\?\\usb#vid_04b4&pid_1004#...']
+d.Board()                 # first board
+d.Board(index=1)          # second board
+d.Board(path=r"\\\\?\\usb#...")
 ```
 
-`usb.BACKEND` says which transport is active (`_cyusb` or `_libusb`), and
-`Board(backend=...)` forces one.
+```rust
+dbk2jp_rs::find_devices(false);        // same paths
+let board = Board::open(0)?;           // or Board::open_path(p)?
+```
+
+The transport is chosen at compile time in Rust (`backend_win` on Windows,
+`backend_libusb` behind the `libusb` feature elsewhere) and at import time in
+the Python package, where `usb.BACKEND` names it and `Board(backend=...)`
+forces one.
 
 ### Windows only: the interface GUID
 
@@ -161,12 +209,18 @@ output is still driving.
 
 The 加密 LED must go green before the board will emit anything.
 
-```python
-from dbk2jp import Board, unlock, encrypt_state
+```rust
+let mut b = Board::open(0)?;
+dbk2jp_rs::unlock::unlock(&mut b, None, true);   // 3 frames, ~0.2 s
+dbk2jp_rs::unlock::encrypt_state(&mut b);        // Some(2) = authenticated
+```
 
-with Board() as b:
-    unlock(b)                     # 3 frames, ~0.2 s
-    encrypt_state(b)              # 2 = authenticated, 0 = not
+```python
+import dbk2jp_rs as d
+
+j = d.Job(unlock_now=False)
+j.ensure_unlocked()               # 3 frames, ~0.2 s
+j.unlocked()                      # True once authenticated
 ```
 
 `Job()` calls this automatically unless you pass `unlock_now=False`.
@@ -214,11 +268,13 @@ Job(laser=CO2, board=None, index=0, unlock_now=True)
 ### Laser selection
 
 ```python
-from dbk2jp import Job, CO2, FIBER, UV, GREEN, MOPA, YAG, LASERS
-
-j.select(FIBER)                              # name, Laser object, or raw code
+j.select("fiber")                            # a name, or a raw code as "0x11"
 j.configure(freq_khz=30, power_byte=0xC0)
-j.settings()                                 # what will go on the wire
+```
+
+```rust
+j.select("fiber")?;
+j.configure(Some(30.0), None, Some(0xC0), None, None, None)?;
 ```
 
 | Type | Code | Power | Tickle | Pulse width | Verified |

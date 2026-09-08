@@ -2,23 +2,27 @@
 
 **⚠️ Work in progress.** Verified on one DBK2JP board. Expect gaps and rough edges.
 
-Drive a **BSL/SeaCAD DBK2JP** galvo laser marking controller directly from Python.
-No proprietary or paid software needed.
+Drive a **BSL/SeaCAD DBK2JP** galvo laser marking controller directly from Rust
+or Python. No proprietary or paid software needed.
 
 On Windows it goes through the board's existing Cypress CYUSB3 driver, so it
 coexists with whatever is already installed and any other software you have
 keeps working alongside it. On Linux and macOS it talks plain libusb instead.
 
-Python 3.8+. Drop the `dbk2jp/` folder next to your script.
+**Two front ends, one driver.** `rust/` is the implementation: a dependency-free
+crate on Windows, with PyO3 bindings published as `dbk2jp_rs`. `dbk2jp/` is the
+original Python package, kept as the reference implementation; the two agree
+frame for frame.
 
-| Platform | Needs | State |
-|---|---|---|
-| Windows | stdlib only (`ctypes` + `winreg`), board on the CYUSB3 driver | verified on hardware |
-| Linux | `pip install pyusb` plus libusb; needs a udev rule or root | verified on hardware |
-| macOS | `pip install pyusb` plus libusb | still to be tried |
+| Platform | Rust needs | Python needs | State |
+|---|---|---|---|
+| Windows | nothing, the Win32 calls are declared inline | stdlib only (`ctypes` + `winreg`) | verified on hardware |
+| Linux | `--features libusb`, plus a udev rule or root | `pip install pyusb` | verified on hardware |
+| macOS | `--features libusb` | `pip install pyusb` | still to be tried |
 
-Same `Board` and `Job` on every platform; only the transport module differs.
-Enumeration, unlock, status and marking are all confirmed on Linux.
+Same `Board` and `Job` on every platform and in both languages; only the
+transport differs. Enumeration, unlock, status and marking are all confirmed on
+Linux.
 
 One Linux quirk worth knowing, since it shows up on the **second** run rather
 than the first: libusb leaves a stalled endpoint stalled across a close, so an
@@ -32,20 +36,48 @@ Examples: **[EXAMPLES.md](EXAMPLES.md)**  |  Full reference: **[API.md](API.md)*
 
 ## Quick start
 
-Mark a square:
+Mark a square, in Rust:
+
+```rust
+use dbk2jp_rs::{Board, Job, PathOpts, Speed};
+
+let mut j = Job::new(Board::open(0)?, "co2", None)?;   // opens the board
+j.ensure_unlocked(2);                                  // unlocks and arms it
+j.configure(Some(20.0), Some(40.0), None, None, None, None)?;
+j.begin((0x4000, 0x4000), 200)?;
+j.path(&[(0x4000, 0x4000),          // coordinates are 16-bit counts,
+         (0xC000, 0x4000),          // 0x8000 is field centre
+         (0xC000, 0xC000),
+         (0x4000, 0xC000),
+         (0x4000, 0x4000)],
+       None, Speed::MmPerSec(600.0), PathOpts::default())?;
+```
+
+or from Python, against the same code:
 
 ```python
-from dbk2jp import Job, CO2
+import dbk2jp_rs as d
 
-with Job(CO2) as j:                        # opens, unlocks, arms the board
-    j.configure(freq_khz=20, power_pct=40,  # marking PWM
-                tick_khz=5.0, tick_us=1.0)  # tickle, on by default for CO2
-    j.begin(start=(0x4000, 0x4000), speed=300)
-    j.lines([(0xC000, 0x4000),             # coordinates are 16-bit,
-             (0xC000, 0xC000),             # 0x8000 is field centre
-             (0x4000, 0xC000),
-             (0x4000, 0x4000)], speed=300)
+with d.Job(laser="co2") as j:              # opens, unlocks, arms the board
+    j.configure(freq_khz=20, power_pct=40)
+    j.begin(start=(0x4000, 0x4000), speed=200)
+    j.path([(0x4000, 0x4000),
+            (0xC000, 0x4000),
+            (0xC000, 0xC000),
+            (0x4000, 0xC000),
+            (0x4000, 0x4000)], mm_s=600)
 ```
+
+Build and install:
+
+```bash
+cd rust && cargo test && maturin develop --release
+```
+
+`cargo test` runs 22 offline checks with no hardware attached. `maturin develop`
+builds the extension into the active virtualenv; `pip install maturin` first.
+
+The command line lives in the reference Python package:
 
 ```bash
 python -m dbk2jp devices          # list boards
@@ -66,15 +98,18 @@ PWM duty for CO2, UV, green and YAG, and an 8-bit parallel word on P0..P7 for
 fiber and MOPA. `configure()` accepts either and derives the other.
 
 ```python
-from dbk2jp import Job, CO2, FIBER, UV, GREEN, MOPA, YAG
+import dbk2jp_rs as d
 
-with Job(FIBER) as j:
+with d.Job(laser="fiber") as j:
     j.configure(freq_khz=30, power_byte=0xC0)
-    print(j.settings())          # exactly what will go on the wire
 
-    j.select(CO2)                # switch type mid-session
+    j.select("co2")              # switch type mid-session
     j.configure(power_pct=35, tickle=True)
 ```
+
+In Rust the type is the same string, and `Job::select` returns the error rather
+than raising it. The names are `co2`, `fiber`, `uv`, `green`, `mopa`, `yag`, or
+a raw code as `"0x22"`.
 
 | Type | Code | Power | Notes |
 |---|---|---|---|
@@ -97,9 +132,9 @@ and **P2 (clock)**. The width is in **nanoseconds**, so 100 ns goes out as
 `A5 01 00 64`. Confirmed on the wire at 100, 150 and 200 ns.
 
 ```python
-from dbk2jp import Job, FIBER
+import dbk2jp_rs as d
 
-with Job(FIBER) as j:
+with d.Job(laser="fiber") as j:
     j.configure(freq_khz=30, power_byte=0x78, mo=True)
     j.mopa_pulse(100)          # nanoseconds
 ```
@@ -176,7 +211,7 @@ Verified on hardware with a scope.
 | **EMSTOP** | sits at 5 V throughout every test. The command set leaves it alone and the software here leaves it alone, so it looks like a pure hardware interlock line, readable and drivable only from hardware |
 | SGIN0..2 | OR'd into one bit, so you learn *that* a fault fired, while *which* one stays hidden |
 | SGIN3 | on the connector, in no status field |
-| Job complete | no flag found. `0x0101` byte 2 bit 3 only says the engine was started, and `free_cache()` reads idle even while vectors execute, so neither can be polled for completion |
+| Job complete | `0x0101` byte 2 bit 5 clears while the queue executes in both vendor captures, exposed as `busy()` and `wait_idle()`, but untested from this library. Bit 3 only says the engine was started |
 | Untested | `out_pulse()` (`0x2F82`), `laser_port_switch()` (`0x2F84`) |
 | `0x0211` Param2 | documented as an MO delay, but sweeping it 0, 1000 and 20000 left every measurement unchanged |
 | Unknown | `0x0232` Param0 = 175, opcode `0x1667`, `0x0211` Param3 and Param4 |
@@ -201,8 +236,9 @@ j.laser_off()          # marking PWM, tickle and gate, all off
 ```
 
 `close()` does this automatically for any job that programmed an output, and
-`with Job(...)` calls `close()`. A script that exits without either still gets
-caught by an exit hook. **A hard kill escapes all of that, and so does pulling
+`with Job(...)` calls `close()`. In Rust, `Drop` does it on every path out of the
+scope, including a panic unwind; in Python a script that exits without closing
+is caught by an exit hook. **A hard kill escapes all of that, and so does pulling
 the USB cable while output is live.**
 
 `guard()` polls SGIN over USB, roughly 4 to 8 ms per round trip, and it dies with
@@ -218,12 +254,18 @@ pulsing after the job ends.
 
 [WTFPL](LICENSE). Do whatever the fuck you want with it.
 
-## The Rust port
+## Layout
 
-This branch carries `rust/`, the same driver in Rust with PyO3 bindings, so
-Python keeps working while the core gains typed units and a `Drop` that
-silences the laser on every path out of a scope. `cargo test` runs 22 offline
-checks with no hardware. See [rust/README.md](rust/README.md).
+| | |
+|---|---|
+| `rust/` | the implementation: dependency-free on Windows, PyO3 bindings as `dbk2jp_rs`, 22 offline tests. See [rust/README.md](rust/README.md) |
+| `dbk2jp/` | the original Python package, kept as the reference implementation and still runs. Holds the command line and the `.cor` scaffold |
+| `API.md` | the full surface and every measured protocol fact |
+| `EXAMPLES.md` | per-laser-type examples and machine integration |
 
-The Python package in `dbk2jp/` stays here as the reference implementation and
-still runs; the two agree frame for frame.
+The two implementations agree frame for frame, which is checked by building the
+extension and comparing its output against the Python package. `main` keeps the
+Python-only history.
+
+Nothing in the Rust port has driven a laser yet: treat its first hardware run as
+a bench test.
