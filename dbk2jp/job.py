@@ -47,6 +47,11 @@ class Job:
         self.b = board if board is not None else Board(index=index)
         self.field = field if field is not None else Field()
         self._live = False          # has this job programmed a laser output?
+        # Machine kinematics, if you know them. Nothing is assumed: with these
+        # unset the geometry checks are purely geometric, and a wiggle can ask
+        # for motion no galvo will produce. See set_limits() and wiggle_load().
+        self.limits = {"max_mm_s": None, "max_accel_mm_s2": None,
+                       "max_loop_hz": None}
         self._closed = False
         self.select(laser)
         # Last-resort net: an interpreter that exits without close() -- an
@@ -543,6 +548,88 @@ class Job:
         out[-1] = (float(p1[0]), float(p1[1]))     # land exactly on the end
         return out                                 # floats: see path()
 
+    def set_limits(self, max_mm_s=None, max_accel_mm_s2=None,
+                   max_loop_hz=None):
+        """State what the machine can actually do, for the wiggle checks.
+
+        Nothing here is guessed. Until you measure your own galvos these stay
+        unset and the streaming methods only check geometry, which is exactly
+        as far as this library can honestly go: the board takes a duration per
+        vector and says nothing about whether the mirrors kept up.
+
+        `max_accel_mm_s2` is the lateral acceleration the mirrors will follow at
+        the working distance, `max_loop_hz` the rate at which a small circle
+        still comes out round rather than smoothed into an oval, and `max_mm_s`
+        the marking speed ceiling. Measure the first two by cutting test loops
+        and looking at where the corners start rounding off.
+        """
+        for k, v in (("max_mm_s", max_mm_s),
+                     ("max_accel_mm_s2", max_accel_mm_s2),
+                     ("max_loop_hz", max_loop_hz)):
+            if v is not None:
+                self.limits[k] = float(v)
+        return dict(self.limits)
+
+    def wiggle_load(self, radius_mm, pitch_mm, mm_s, steps=16):
+        """What a wiggle asks of the mirrors, before you cut anything.
+
+        Returns loop rate, the lateral acceleration the circles demand, the
+        exposure multiplier, the vector rate the board has to consume, and a
+        list of whatever exceeds the limits set on this Job.
+
+        The acceleration is the honest number that makes or breaks a wiggle: a
+        circle of radius r walked at v needs v^2 / r sideways, all the time.
+        0.1 mm at 600 mm/s is 3.6e6 mm/s^2, some 367 g, which no galvo follows.
+        What comes out instead is a smoothed, smaller loop with the dwell piling
+        up wherever the servo reverses, so the exposure bunches at the turns
+        rather than spreading along the cut. Slower feed or a larger radius are
+        the two ways out, and both cost throughput.
+        """
+        r = float(radius_mm)
+        pitch = float(pitch_mm)
+        v = float(mm_s)
+        if r <= 0 or pitch <= 0 or v <= 0:
+            raise ValueError("radius, pitch and mm_s must all be positive")
+        traced_per_turn = ((2.0 * math.pi * r) ** 2 + pitch ** 2) ** 0.5
+        out = {
+            "loop_hz": v / pitch,
+            "accel_mm_s2": v * v / r,
+            "accel_g": v * v / r / 9810.0,
+            "exposure": traced_per_turn / pitch,
+            "chord_mm": traced_per_turn / max(4, int(steps)),
+            "vectors_per_s": v * (traced_per_turn / pitch) /
+                             (traced_per_turn / max(4, int(steps))),
+        }
+        over = []
+        lim = self.limits
+        if lim.get("max_mm_s") and v > lim["max_mm_s"]:
+            over.append("feed %g mm/s over the %g limit" % (v, lim["max_mm_s"]))
+        if lim.get("max_accel_mm_s2") and out["accel_mm_s2"] > lim["max_accel_mm_s2"]:
+            over.append("needs %.3g mm/s^2 lateral, limit %.3g"
+                        % (out["accel_mm_s2"], lim["max_accel_mm_s2"]))
+        if lim.get("max_loop_hz") and out["loop_hz"] > lim["max_loop_hz"]:
+            over.append("%.0f loops/s over the %.0f limit"
+                        % (out["loop_hz"], lim["max_loop_hz"]))
+        if out["vectors_per_s"] > 1.0 / SEG_MIN:
+            over.append("%.0f vectors/s over the board's measured %.0f"
+                        % (out["vectors_per_s"], 1.0 / SEG_MIN))
+        out["exceeded"] = over
+        return out
+
+    def runup_mm(self, mm_s, accel_mm_s2=None):
+        """Run-up length that actually reaches `mm_s`, as v^2 / 2a.
+
+        Uses `max_accel_mm_s2` from set_limits() unless you pass one. The
+        overshoot arguments elsewhere take whatever number you give them and
+        make no claim that the mirrors are up to speed by the end of it; this is
+        how to pick that number once you know the machine.
+        """
+        a = accel_mm_s2 or self.limits.get("max_accel_mm_s2")
+        if not a:
+            raise ValueError("no acceleration known: pass accel_mm_s2 or call "
+                             "set_limits(max_accel_mm_s2=...)")
+        return float(mm_s) ** 2 / (2.0 * float(a))
+
     def _emit(self, cmds):
         """Write batched commands, chunked and paced against their durations.
 
@@ -596,6 +683,13 @@ class Job:
         would add half a millisecond of dwell per vector, which on a wiggled
         segment of a few hundred vectors is most of the job.
 
+        The path is kinematically ideal: Param0 is a duration and the board
+        interpolates it, so nothing here knows whether the mirrors kept up.
+        A wiggle is where that bites, since a circle of radius r at v mm/s needs
+        v^2 / r of lateral acceleration continuously. Call wiggle_load() for the
+        numbers, set_limits() to have them checked, and runup_mm() to size the
+        overshoot.
+
         `wiggle` widens the burn: each lit segment is traced as small circles of
         that radius in counts, advancing `wiggle_pitch` counts per turn, at
         `wiggle_steps` points per turn. The kerf comes out about 2 * wiggle
@@ -629,6 +723,19 @@ class Job:
                                  "(counts of travel per circle)")
             if int(wiggle_steps) < 4:
                 raise ValueError("wiggle_steps must be at least 4")
+            if mm_s:
+                load = self.wiggle_load(wig * self.field.mm_per_count,
+                                        wiggle_pitch * self.field.mm_per_count,
+                                        mm_s, wiggle_steps)
+                if load["exceeded"]:
+                    warnings.warn(
+                        "wiggle asks for %.0f loops/s and %.3g mm/s^2 (%.0f g) "
+                        "of lateral acceleration: %s. The mirrors will round "
+                        "the loops off and the exposure will bunch at the "
+                        "turns instead of spreading along the cut."
+                        % (load["loop_hz"], load["accel_mm_s2"],
+                           load["accel_g"], "; ".join(load["exceeded"])),
+                        stacklevel=2)
 
         granted = over
         cmds = []

@@ -300,6 +300,8 @@ See EXAMPLES.md.
 | `mopa_pulse(ns)` | MOPA pulse width in nanoseconds, SPI frame on P1 and P2 |
 | `laser_port_switch(...)` | port switch, purpose unknown |
 | `running()` | engine started (`0x0101` byte 2 bit 3). **Not** "still marking" |
+| `wiggle_load(r_mm, pitch_mm, mm_s)` | what a wiggle demands of the mirrors, before cutting |
+| `set_limits(...)` / `runup_mm(mm_s)` | state the machine kinematics; size a run-up |
 | `busy()` / `wait_idle(timeout)` | queue still executing, from byte 2 bit 5. Read from vendor captures, unverified here |
 | `free_cache()` | free queue slots, **0 to 256** |
 | `laser_off()` | silence every laser output: marking PWM, tickle, gate |
@@ -460,6 +462,42 @@ Bounds apply to the widened path too: a circle that would leave the field raises
 rather than being flattened against the edge, and the message names the offending
 wiggle point. A radius or pitch given in millimetres that rounds to less than one
 galvo count warns rather than quietly marking a plain line.
+
+**The path is kinematically ideal, and the mirrors are not.** Param0 is a
+duration the board interpolates; nothing in the protocol reports whether the
+galvos kept up. A wiggle is where that matters, because a circle of radius *r*
+walked at *v* needs `v^2 / r` of lateral acceleration continuously:
+
+| radius | pitch | feed | loops/s | lateral | exposure |
+|---|---|---|---|---|---|
+| 0.1 mm | 0.6 mm | 600 mm/s | 1000 | 367 g | 1.45x |
+| 0.1 mm | 0.6 mm | 150 mm/s | 250 | 23 g | 1.45x |
+| 0.3 mm | 1.0 mm | 300 mm/s | 300 | 31 g | 2.13x |
+
+Ask for more than the mirrors will follow and they round the loops off into
+smaller, smoothed ovals, and the dwell piles up wherever the servo reverses. The
+exposure then bunches at the turns rather than spreading along the cut, which is
+the opposite of what the wiggle was for. Feed rate and radius are the two ways
+out, and the first row above shows the trap: dropping the feed by 4x leaves the
+exposure multiplier untouched while cutting the acceleration demand by 16.
+
+```python
+j.wiggle_load(0.1, 0.6, 600)
+# loop_hz 1000, accel_g 367, exposure 1.45, vectors_per_s 16000, exceeded [...]
+
+j.set_limits(max_mm_s=3000, max_accel_mm_s2=200000, max_loop_hz=250)
+j.runup_mm(600)        # 0.900 mm to reach 600 mm/s at that acceleration
+```
+
+`wiggle_load()` needs no limits to report the physics. `set_limits()` states what
+your machine will do, and `path()` then warns when a wiggle exceeds it. Nothing
+is assumed: with the limits unset, only the vector rate is checked, against the
+board's own measured ~33 000 vectors per second. Measure the other two by cutting
+test loops and watching where the corners start rounding.
+
+`runup_mm(mm_s)` sizes the `overshoot` argument as `v^2 / 2a`. The overshoot
+arguments themselves take whatever number you give and make no claim that the
+mirrors are up to speed by the end of it.
 
 ```python
 r = j.segments_mm([((-10, 0), (10, 0))], mm_s=1500, overshoot_mm=0.5)
