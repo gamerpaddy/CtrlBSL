@@ -15,6 +15,7 @@ board ACKs parameter commands on EP 0x06 and then silently ignores them.
 """
 
 import atexit
+import math
 import time
 import warnings
 
@@ -403,6 +404,331 @@ class Job:
             blob = b"".join(S.cmd(0x0243, speed, x, y, 0, 500) for x, y in chunk)
             self.b.write_data(blob)
             time.sleep(len(chunk) * per_seg * 0.92)
+
+    # ---- position streaming ---------------------------------------------
+    #
+    # One write per batch instead of one per call, and the laser state carried
+    # per segment rather than per method. Geometry only: no shapes, no fills,
+    # just cheaper ways to hand the board a run of points.
+
+    FULL = 0xFFFF               # galvo travel limit, both axes
+
+    def _len_mm(self, p0, p1):
+        """Straight-line length of a counts-space move, in millimetres.
+
+        Goes through the field, so aspect, mirror and swap are accounted for.
+        That is what makes a feed rate mean the same thing on both axes.
+        """
+        ax, ay = self.field.to_mm(*p0)
+        bx, by = self.field.to_mm(*p1)
+        return ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
+
+    def _duration(self, p0, p1, speed=None, mm_s=None):
+        """Param0 for the move p0->p1: microseconds, floor of 1.
+
+        Give either `speed` (raw Param0, the duration itself) or `mm_s` (a feed
+        rate, converted per segment through the field). A feed rate is the
+        honest way to paint unequal segments evenly, since Param0 is a duration
+        and one fixed value across mixed lengths gives mixed speeds.
+        """
+        if (speed is None) == (mm_s is None):
+            raise ValueError("give exactly one of speed= (microseconds) or "
+                             "mm_s= (millimetres per second)")
+        if speed is not None:
+            return max(1, int(speed))
+        if mm_s <= 0:
+            raise ValueError("mm_s must be positive")
+        return max(1, int(round(self._len_mm(p0, p1) / mm_s * 1e6)))
+
+    def _in_field(self, pt):
+        return 0 <= pt[0] <= self.FULL and 0 <= pt[1] <= self.FULL
+
+    def _require_in_field(self, pts, what="point"):
+        for x, y in pts:
+            if not self._in_field((x, y)):
+                raise ValueError(
+                    "%s (%d, %d) is outside the galvo travel limits 0..%d"
+                    % (what, x, y, self.FULL))
+
+    def _lead(self, p0, p1, counts, at_start):
+        """A point `counts` beyond p0 (or past p1) along the p0->p1 line."""
+        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+        d = (dx * dx + dy * dy) ** 0.5
+        if d == 0 or counts <= 0:
+            return p0 if at_start else p1
+        ux, uy = dx / d, dy / d
+        if at_start:
+            return (int(round(p0[0] - ux * counts)),
+                    int(round(p0[1] - uy * counts)))
+        return (int(round(p1[0] + ux * counts)),
+                int(round(p1[1] + uy * counts)))
+
+    def _fit_overshoot(self, p0, p1, counts, at_start):
+        """Longest run-up up to `counts` that stays inside the travel limits.
+
+        Shrinking beats refusing: a shorter run-up still marks the requested
+        geometry, while a refusal turns a reachable job into no job. Returns
+        (point, granted_counts).
+        """
+        lo, hi = 0, int(counts)
+        best = ((p0 if at_start else p1), 0)
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            pt = self._lead(p0, p1, mid, at_start)
+            if self._in_field(pt):
+                best = (pt, mid)
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return best
+
+    def _wiggle(self, p0, p1, radius, pitch, steps):
+        """p0 -> p1 traced as small circles, to widen the burn.
+
+        The mark walks the straight line while orbiting it, so the lit area is
+        the line plus a circle of `radius` swept along it: a kerf about
+        2 * radius wide. `pitch` is how far along the line one full circle
+        advances, `steps` how many points make up each circle.
+
+        The exact endpoints are kept at both ends, so joints stay where the
+        caller put them and only the middle is widened. Returns the points
+        after p0, p1 included, as floats so the resampling below stays exact;
+        path() rounds them to counts before timing and emitting.
+        """
+        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+        length = (dx * dx + dy * dy) ** 0.5
+        if length == 0 or radius <= 0:
+            return [p1]
+        ux, uy = dx / length, dy / length
+        turns = max(1.0, length / float(pitch))
+        n = max(int(round(turns * steps)), steps)
+
+        def at(f):
+            a = 2.0 * math.pi * turns * f
+            return (p0[0] + ux * length * f + radius * math.cos(a),
+                    p0[1] + uy * length * f + radius * math.sin(a))
+
+        # Sampling the loop at even parameter steps bunches the points where the
+        # curve doubles back on itself: with a radius near the pitch, one step
+        # covers a couple of counts and the next covers fifty, so the exposure
+        # is uneven and the short chords quantise badly. Resample by arc length
+        # instead, which is what makes every sub-segment the same length and
+        # therefore the same duration.
+        dense = max(n * 8, 512)
+        pts = [at(i / float(dense)) for i in range(dense + 1)]
+        acc, cum = 0.0, [0.0]
+        for a, b in zip(pts, pts[1:]):
+            acc += math.hypot(b[0] - a[0], b[1] - a[1])
+            cum.append(acc)
+        total = acc or 1.0
+
+        out, j = [], 0
+        for i in range(1, n + 1):
+            want = total * i / float(n)
+            while j < len(cum) - 2 and cum[j + 1] < want:
+                j += 1
+            span = cum[j + 1] - cum[j]
+            t = 0.0 if span <= 0 else (want - cum[j]) / span
+            ax, ay = pts[j]
+            bx, by = pts[j + 1]
+            out.append((ax + (bx - ax) * t, ay + (by - ay) * t))
+        out[-1] = (float(p1[0]), float(p1[1]))     # land exactly on the end
+        return out                                 # floats: see path()
+
+    def _emit(self, cmds):
+        """Write batched commands, chunked and paced against their durations."""
+        total = 0
+        for i in range(0, len(cmds), MAX_SEGS):
+            chunk = cmds[i:i + MAX_SEGS]
+            us = sum(d for _, d in chunk)
+            total += us
+            self.b.write_data(b"".join(c for c, _ in chunk))
+            time.sleep(max(len(chunk) * SEG_TIME, us * 1e-6) * 0.92)
+        self._live = True
+        return total
+
+    def path(self, points, lit=None, speed=None, mm_s=None,
+             jump_speed=0x2710, jump_delay=0x01F4, overshoot=0, delay=500,
+             wiggle=0, wiggle_pitch=None, wiggle_steps=16):
+        """Stream a run of points with the laser on or off per segment.
+
+        `points` is a list of (x, y) in counts. `lit` is one boolean per
+        segment, so segment i runs points[i] -> points[i+1] as `0x0243` when
+        lit and `0x0241` when not. All lit if `lit` is omitted. That gates the
+        laser inside one continuous position stream instead of one call per
+        piece, and the whole run goes out in MAX_SEGS-sized writes.
+
+        `overshoot` is a laser-off run-up in counts, added before the first
+        segment of each lit run and after the last, along that segment's own
+        direction, so the mirrors are already moving when the laser strikes.
+        It is trimmed to the travel limits rather than refused; the granted
+        length comes back in the return value.
+
+        Speed: pass `speed` for a raw Param0 duration, or `mm_s` for a feed
+        rate converted per segment. The run-up and run-out move at the same
+        rate as the segment they belong to.
+
+        `wiggle` widens the burn: each lit segment is traced as small circles of
+        that radius in counts, advancing `wiggle_pitch` counts per turn, at
+        `wiggle_steps` points per turn. The kerf comes out about 2 * wiggle
+        wide. Unlit segments are left as plain jumps. With `mm_s` the feed rate
+        holds along the real, longer, traced path, so a wiggled segment takes
+        proportionally longer; with `speed` the given duration is split across
+        the traced path instead, so the segment still takes what you asked.
+
+        The geometry is bounds-checked before anything is written, so a point
+        outside 0..0xFFFF stops the job instead of clipping it mid-stream. That
+        includes the wiggle: a circle that would leave the field raises rather
+        than being flattened against the edge.
+
+        Returns {"commands", "us", "overshoot"}.
+        """
+        pts = [(int(x), int(y)) for x, y in points]
+        if len(pts) < 2:
+            raise ValueError("path needs at least two points")
+        flags = [True] * (len(pts) - 1) if lit is None else [bool(v) for v in lit]
+        if len(flags) != len(pts) - 1:
+            raise ValueError("lit needs one flag per segment: %d flags for %d "
+                             "points" % (len(pts) - 1, len(pts)))
+        self._require_in_field(pts)
+        over = max(0, int(overshoot))
+        wig = max(0, int(wiggle))
+        if wig:
+            if wiggle_pitch is None or wiggle_pitch <= 0:
+                raise ValueError("wiggle needs a positive wiggle_pitch "
+                                 "(counts of travel per circle)")
+            if int(wiggle_steps) < 4:
+                raise ValueError("wiggle_steps must be at least 4")
+
+        granted = over
+        cmds = []
+        at = None
+        for i, on in enumerate(flags):
+            p0, p1 = pts[i], pts[i + 1]
+            starts_run = on and (i == 0 or not flags[i - 1])
+            ends_run = on and (i == len(flags) - 1 or not flags[i + 1])
+
+            if starts_run and over:
+                lead, got = self._fit_overshoot(p0, p1, over, True)
+                granted = min(granted, got)
+                cmds.append((S.cmd(0x0241, jump_speed, lead[0], lead[1], 0,
+                                   jump_delay), jump_speed))
+                if got:
+                    us = self._duration(lead, p0, speed, mm_s)
+                    cmds.append((S.cmd(0x0241, us, p0[0], p0[1], 0, 0), us))
+                at = p0
+            elif at != p0:
+                cmds.append((S.cmd(0x0241, jump_speed, p0[0], p0[1], 0,
+                                   jump_delay), jump_speed))
+                at = p0
+
+            if on and wig:
+                curve = self._wiggle(p0, p1, wig, wiggle_pitch,
+                                     int(wiggle_steps))
+                chain = [(int(round(x)), int(round(y))) for x, y in curve]
+                self._require_in_field(chain, "wiggle point")
+                # Time the rounded points, not the ideal curve: those integers
+                # are the only thing the board ever moves between, so timing
+                # anything else puts the error straight into the feed rate.
+                pairs = list(zip([p0] + chain[:-1], chain))
+                if mm_s is not None:
+                    subs = [self._duration(a, b, None, mm_s) for a, b in pairs]
+                else:
+                    # Split the requested duration along the traced path, so a
+                    # wiggled segment still takes the time the caller asked for.
+                    lens = [self._len_mm(a, b) for a, b in pairs]
+                    tot = sum(lens) or 1.0
+                    subs = [max(1, int(round(speed * L / tot))) for L in lens]
+                for (bx, by), sub in zip(chain, subs):
+                    cmds.append((S.cmd(0x0243, sub, bx, by, 0, delay), sub))
+            else:
+                us = self._duration(p0, p1, speed, mm_s)
+                cmds.append((S.cmd(0x0243 if on else 0x0241, us, p1[0], p1[1],
+                                   0, delay if on else 0), us))
+            at = p1
+
+            if ends_run and over:
+                out, got = self._fit_overshoot(p0, p1, over, False)
+                granted = min(granted, got)
+                if got:
+                    us = self._duration(p1, out, speed, mm_s)
+                    cmds.append((S.cmd(0x0241, us, out[0], out[1], 0, 0), us))
+                    at = out
+
+        total = self._emit(cmds)
+        return {"commands": len(cmds), "us": total,
+                "overshoot": granted if over else 0}
+
+    def segments(self, segs, speed=None, mm_s=None, jump_speed=0x2710,
+                 jump_delay=0x01F4, overshoot=0, delay=500,
+                 wiggle=0, wiggle_pitch=None, wiggle_steps=16):
+        """Mark disjoint segments: an iterable of ((x0, y0), (x1, y1)) in counts.
+
+        Each segment gets its own jump, run-up and run-out, and the lot travels
+        as one batch, so n segments cost one write rather than 2n calls. Same
+        arguments and return value as path().
+        """
+        pts, flags = [], []
+        for a, b in segs:
+            if pts:
+                pts.append((int(a[0]), int(a[1])))
+                flags.append(False)             # the connecting jump
+            else:
+                pts.append((int(a[0]), int(a[1])))
+            pts.append((int(b[0]), int(b[1])))
+            flags.append(True)
+        if not flags:
+            raise ValueError("no segments given")
+        return self.path(pts, lit=flags, speed=speed, mm_s=mm_s,
+                         jump_speed=jump_speed, jump_delay=jump_delay,
+                         overshoot=overshoot, delay=delay, wiggle=wiggle,
+                         wiggle_pitch=wiggle_pitch, wiggle_steps=wiggle_steps)
+
+    def dots(self, points, dwell_us, jump_speed=0x2710, jump_delay=0x01F4):
+        """Point marking: jump to each point and fire for `dwell_us`. UNTESTED.
+
+        Emitted as a zero-length `0x0243` whose Param0 is the dwell, the shape
+        both vendor hosts use for a settle. Whether the board honours a
+        zero-length lit vector as a timed dot has not been measured here.
+        """
+        pts = [(int(x), int(y)) for x, y in points]
+        self._require_in_field(pts)
+        dwell = max(1, int(dwell_us))
+        cmds = []
+        for x, y in pts:
+            cmds.append((S.cmd(0x0241, jump_speed, x, y, 0, jump_delay),
+                         jump_speed))
+            cmds.append((S.cmd(0x0243, dwell, x, y, 0, 0), dwell))
+        total = self._emit(cmds)
+        return {"commands": len(cmds), "us": total, "overshoot": 0}
+
+    def _counts(self, mm):
+        """Millimetres to a count distance, for radii and spacings."""
+        return int(round(float(mm) / self.field.mm_per_count)) if mm else 0
+
+    def path_mm(self, points_mm, lit=None, overshoot_mm=0.0, wiggle_mm=0.0,
+                wiggle_pitch_mm=0.0, clamp=False, **kw):
+        """path() with points, run-up and wiggle in millimetres."""
+        pts = [self.mm(x, y, clamp) for x, y in points_mm]
+        return self.path(pts, lit=lit, overshoot=self._counts(overshoot_mm),
+                         wiggle=self._counts(wiggle_mm),
+                         wiggle_pitch=self._counts(wiggle_pitch_mm) or None,
+                         **kw)
+
+    def segments_mm(self, segs_mm, overshoot_mm=0.0, wiggle_mm=0.0,
+                    wiggle_pitch_mm=0.0, clamp=False, **kw):
+        """segments() with points, run-up and wiggle in millimetres."""
+        segs = [(self.mm(a[0], a[1], clamp), self.mm(b[0], b[1], clamp))
+                for a, b in segs_mm]
+        return self.segments(segs, overshoot=self._counts(overshoot_mm),
+                             wiggle=self._counts(wiggle_mm),
+                             wiggle_pitch=self._counts(wiggle_pitch_mm) or None,
+                             **kw)
+
+    def dots_mm(self, points_mm, dwell_us, clamp=False, **kw):
+        """dots() with points in millimetres."""
+        return self.dots([self.mm(x, y, clamp) for x, y in points_mm],
+                         dwell_us, **kw)
 
     def jump(self, x, y, speed=0x2710, delay=0x01F4):
         """Unlit move to (x, y). 0x8000 is centre, full span 0x0000..0xFFFF.

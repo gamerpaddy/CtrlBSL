@@ -289,6 +289,10 @@ See EXAMPLES.md.
 | `power_byte(value, freq_khz)` | write the fiber P0-P7 word immediately, outside a job |
 | `tick(freq_khz, width_us, enable)` / `tick_off()` | CO2 tickle shape. Either argument may be omitted to keep the current value. Returns `(actual_hz, width_ticks, duty_pct)`. **Free-running** - survives job end *and host exit* |
 | `begin(start, speed)` / `lines(points, speed)` | lit vector streaming. `speed` is the per-segment **duration in microseconds**, see below |
+| `path(points, lit=..., mm_s=...)` | one position stream, laser gated per segment, with optional run-up and wiggle |
+| `segments(segs, ...)` | disjoint segments in one batch |
+| `dots(points, dwell_us)` | point marking. **UNTESTED** |
+| `path_mm` / `segments_mm` / `dots_mm` | the same in millimetres |
 | `jump(x, y, speed, delay)` | unlit move. `0x8000` is centre, span `0x0000`-`0xFFFF`. `speed` is a duration, `delay` a settle time, both microseconds |
 | `pwm_burst(seconds, ...)` | sustained PWM for scope work, paced off `free_cache()` |
 | `red_light(on)` | pilot pointer, CON3 pin 22 |
@@ -387,6 +391,77 @@ that capture is an independent confirmation of the red-light encoding rather
 than a laser type of `0x22`. What is still open is the type value itself:
 LightBurn sent `0x1100` in one session and `0x0000` in another, BslApp `0x0000`,
 all marking correctly. None of this has been tested here in isolation.
+
+### Streaming positions
+
+`lines()` marks everything it is given. These three carry the laser state with
+the geometry instead, and batch the whole run into `MAX_SEGS`-sized writes:
+
+```python
+j.path(pts, lit=[True, False, True], mm_s=800)     # gate per segment
+j.segments([(a, b), (c, d)], mm_s=800)             # disjoint segments, one batch
+j.dots(pts, dwell_us=250)                          # UNTESTED
+```
+
+`path(points, lit)` takes one boolean per segment, so segment *i* runs
+`points[i] -> points[i+1]` as `0x0243` when lit and `0x0241` when not. That is
+the way to turn the laser off partway through a run of points without a call per
+piece. `segments()` builds the same stream from disjoint pairs, adding the
+connecting jumps itself: *n* segments cost one write rather than 2*n* calls.
+
+Speed comes either as `speed=` (raw Param0, a duration) or `mm_s=` (a feed rate,
+converted per segment through the field, which is the only way to paint unequal
+segments evenly). Exactly one of the two, or it raises.
+
+**Run-up (`overshoot`)** adds a laser-off lead-in before the first segment of
+each lit run and a lead-out after the last, along that segment's own direction,
+so the mirrors are already at speed when the laser strikes and still moving when
+it stops. Both move at the segment's own rate. In counts for `path()` and
+`segments()`, in millimetres for the `_mm` wrappers.
+
+Run-up is trimmed, not refused: a lead-in that would leave the 0..0xFFFF travel
+limits is shortened to the longest one that fits, and the granted length comes
+back in the return value, so marking near an edge still happens with whatever
+acceleration distance is available.
+
+**Wiggle** widens the burn by orbiting the line while walking it, so the lit
+area is the line swept by a circle:
+
+```python
+j.path(pts, mm_s=600, wiggle=60, wiggle_pitch=400)       # counts
+j.segments_mm(segs, mm_s=600, wiggle_mm=0.1, wiggle_pitch_mm=0.6)
+```
+
+`wiggle` is the circle radius, `wiggle_pitch` how far along the line one full
+circle advances, `wiggle_steps` how many points make up a circle (16 by
+default). The kerf comes out about `2 * wiggle` wide: a 60 count radius on a
+110 mm field measured 120 counts, 0.20 mm, across the traced path. Only lit
+segments are wiggled; unlit ones stay single jumps.
+
+Points are spaced by arc length rather than by angle. Sampling the loop evenly
+in angle bunches them where the curve doubles back, which both burns unevenly
+and quantises badly once a chord drops near a single count.
+
+Timing follows the real traced path, which is longer than the straight line: at
+a fixed `mm_s` a wiggled segment takes proportionally longer (1.21x for the
+numbers above), while with `speed=` the duration you gave is split across the
+traced path so the segment still takes what you asked. Durations are computed
+from the rounded, integer-count points, since those are the only positions the
+board ever moves between.
+
+Bounds apply to the widened path too: a circle that would leave the field raises
+rather than being flattened against the edge, and the message names the offending
+wiggle point.
+
+```python
+r = j.segments_mm([((-10, 0), (10, 0))], mm_s=1500, overshoot_mm=0.5)
+# {'commands': 4, 'us': 24000, 'overshoot': 298}   <- 298 counts = 0.5 mm granted
+```
+
+The geometry itself is bounds-checked before anything is written, so a point
+outside the travel limits raises rather than clipping mid-stream. All three
+return `{"commands", "us", "overshoot"}`, where `us` is the summed duration the
+board should take, which is also what the host paces against.
 
 ### EP 0x84 acknowledges every EP 0x02 write
 
