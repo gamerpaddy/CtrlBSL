@@ -27,7 +27,7 @@ See API.md for the full surface and DBK2JP_PROTOCOL.md for the reverse
 engineering behind it.
 """
 
-from .usb import Board, SeaBoard, find_devices, VID, PID
+from .usb import Board, BoardError, SeaBoard, find_devices, VID, PID
 from .protocol import cmd, parse, set_power_0210, set_power_raw
 from .unlock import unlock, encrypt_state, FRAMES, SETS
 from .laser import CO2, FIBER, UV, GREEN, MOPA, YAG, LASERS, Laser
@@ -37,7 +37,7 @@ from .job import (Job, CENTRE, LASER_CO2, LASER_FIBER, LASER_UV, LASER_GREEN,
                   LASER_MOPA)
 
 __all__ = [
-    "Board", "SeaBoard", "find_devices", "VID", "PID",
+    "Board", "BoardError", "SeaBoard", "find_devices", "VID", "PID",
     "cmd", "parse", "set_power_0210", "set_power_raw",
     "unlock", "encrypt_state", "FRAMES", "SETS",
     "Job", "CENTRE",

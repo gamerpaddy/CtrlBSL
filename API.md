@@ -139,6 +139,24 @@ This produced phantom `0x0000` status words before it was found.
 
 ---
 
+### Failures
+
+Transfers that the driver rejects raise `BoardError` instead of returning
+quietly. A write on a stalled pipe otherwise looks exactly like a write that
+worked, which is the failure mode that made the Linux endpoint bug so hard to
+see. The status helpers keep their old contract and answer `None` when the board
+does not, so only the data path raises: geometry that never landed must not look
+like geometry that did. `recover()` clears and resets all four endpoints, and
+`ask()` now runs it once by itself when the reply pipe stops answering, then
+retries.
+
+`laser_off()` treats its own failure as serious: if the silencing write fails it
+recovers the endpoints, writes once more, and warns loudly if that also fails,
+since the alternative is returning as though the board were quiet while an
+output is still driving.
+
+---
+
 ## Unlocking
 
 The 加密 LED must go green before the board will emit anything.
@@ -152,6 +170,12 @@ with Board() as b:
 ```
 
 `Job()` calls this automatically unless you pass `unlock_now=False`.
+`ensure_unlocked(attempts=2)` replays until the board reports authenticated: the
+ATSHA204 answers from stale registers when it is rushed, the latch is sticky, and
+a repeat costs nothing. It warns rather than failing silently if the board stays
+locked, which otherwise shows up as a job that runs and emits nothing.
+`encrypt_state()` returns `None` when the reply is missing or short, so an
+unreadable board is distinguishable from a locked one.
 
 Three frames are enough: the host-computed SHA-256 digest on `0x0C5D`, the MAC
 command on `0x0C5C`, and the transmit token. The inter-frame gaps are
@@ -162,7 +186,22 @@ Larger sets are kept for debugging: `SETS["bare"|"rb"|"wake"|"core"|"auth"|"min"
 
 **Read the unlock state from `0x0102` byte 7, and treat `0x0101` bit 5 as
 unrelated.** Bit 5 is a
-ready/arm flag; the reset tail sets it with the LED still red.
+ready/arm flag; the reset tail sets it with the LED still red. Vendor captures
+put a second meaning on it: it also clears while the vector queue executes, see
+Laser status and safety.
+
+USB captures of both BslApp and LightBurn driving the same board run the
+identical exchange, each with its own digest and challenge bytes, so the
+handshake works with any host-drawn challenge rather than only the captured one.
+BslApp matches the frame list here command for command, including the licence
+tail and the `0106 0105 0104 [jump] 0105 0118 0105` arm sequence, which is where
+that list came from. Its preamble differs: it opens with `0x0123`
+(replies `FFFF`), `0x0140` with Param4 = 1, and `0x0110` (replies `05 12 08 0D`,
+a version word that also leads the `0x0102` reply), then reads the ATSHA data
+zone at word address `0x0018` twice before the config read this library starts
+from. None of that is needed for the gate. It also skips the long
+`0x2000` / `0x3000` / `0x3800` read tail entirely and goes straight to `0x0102`,
+`0x0105`, `0x010D`, `0x0104`.
 
 ---
 
@@ -257,14 +296,35 @@ See EXAMPLES.md.
 | `mopa_pulse(ns)` | MOPA pulse width in nanoseconds, SPI frame on P1 and P2 |
 | `laser_port_switch(...)` | port switch, purpose unknown |
 | `running()` | engine started (`0x0101` byte 2 bit 3). **Not** "still marking" |
+| `busy()` / `wait_idle(timeout)` | queue still executing, from byte 2 bit 5. Read from vendor captures, unverified here |
 | `free_cache()` | free queue slots, **0 to 256** |
 | `laser_off()` | silence every laser output: marking PWM, tickle, gate |
 | `stop()` / `close(quiet=True)` | `close` runs `laser_off()` for any job that programmed an output |
 
-There is **no job-complete indicator**. `running()` is set by `0x0104` and stays
-set until a reset, and `free_cache()` reads idle even while vectors are
-executing. Time your own waits; `axis_move()` returns its expected duration for
-exactly this reason.
+There is **no job-complete indicator exposed here**. `running()` is set by
+`0x0104` and stays set until a reset, and `free_cache()` reads idle even while
+vectors are executing. Time your own waits; `axis_move()` returns its expected
+duration for exactly this reason.
+
+Vendor captures say one exists: `0x0101` byte 2 bit 5 (`0x20`) clears while the
+queue executes and sets again when it drains, with no host action, in both
+LightBurn and BslApp. LightBurn gave a 34 ms window against about 25 ms of summed
+vector durations; BslApp gave a clean 2.475 s window on a 1473-vector fill.
+
+```
+4.263  byte2 = 0x2E   idle, armed
+4.272  byte2 = 0x0E   executing
+4.306  byte2 = 0x2E   drained
+```
+
+Untested from this library, and it cuts against the reading of `0x0e` as a lost
+unlock bit below, where it is the ordinary executing state and recovers on its
+own. Confirm on the bench before relying on either.
+
+`busy()` and `wait_idle(timeout, poll)` expose it. `wait_idle` returns False on
+timeout rather than raising, so a board that never sets the bit costs a wait and
+nothing else, and `armed()` reads the same bit: it returns False mid-mark on a
+perfectly healthy board.
 
 **Laser outputs latch.** A power level stays on the laser control pin until it
 is cleared. A plain reset leaves it running: the generator has to be zeroed
@@ -297,6 +357,51 @@ but changing it leaves all of this where it is.
 drains the queue between chunks and the output visibly drops to tickle-only
 about once a second.
 
+### What the vendor host sends that this library does not
+
+From the same LightBurn capture, for anyone chasing a behaviour difference:
+
+| command | LightBurn | BslApp | here |
+|---|---|---|---|
+| `0x0123` | opens the session | absent | absent |
+| `0x0140`, `0x0110` | before unlock | before unlock | absent |
+| `0x010D` | once at init | absent | absent |
+| `0x0205` | absent | once, ahead of the first vector | absent |
+| `0x0212` | `0 0 FFFF FFFF 0` | same | absent |
+| `0x0213` | all zeros | P2 = `0x00FF` | absent |
+| `0x0106` | never | before every job and between framing chunks | before every job |
+| `0x0118` | never | once in the init tail | in the unlock tail |
+
+`0x0110` is a firmware version read: it replied `05 12 08 0D` while BslApp's own
+log printed `FPGA:5.18.8.13`. The same four bytes lead the `0x0102` reply.
+
+Header fields left at zero here that a vendor host sets: `0x0208` Param1 carries
+laser on TC (LightBurn), `0x0211` Param1 carries an extra bit beside
+`MO_ENABLE` (`0x0900` in LightBurn, `0x4100` in BslApp), and `0x0211` Param2 is
+8000 in every capture from both.
+
+`0x0211` Param0 behaves exactly as `red_light()` describes it: high byte laser
+type, low byte red-light flag. BslApp sent `0x0022` on the header that preceded
+its jump-only framing pass and `0x0000` on the one that preceded the marks, so
+that capture is an independent confirmation of the red-light encoding rather
+than a laser type of `0x22`. What is still open is the type value itself:
+LightBurn sent `0x1100` in one session and `0x0000` in another, BslApp `0x0000`,
+all marking correctly. None of this has been tested here in isolation.
+
+### EP 0x84 acknowledges every EP 0x02 write
+
+Each write to EP 0x02 is answered on EP 0x84 with a 12-byte record: opcode
+`0x0003`, a 16-bit running counter that advances 6 per 12-byte command accepted,
+a state byte, then the same free-slot word as `0x0101` bytes 5 and 6. The
+vendor capture holds 3631 writes and 3631 acks, one to one, so pacing can ride
+the acks with no status polling at all. This library polls `0x0101` instead and
+never reads EP 0x84.
+
+The free-slot word read `0x0FBD` idle and walked down to `0x0F96` under sustained
+streaming, with the high byte fixed at `0x0F` throughout. That is the low byte
+moving from 189 to 150 of 256, so it confirms the masking `free_cache()` already
+does rather than contradicting it.
+
 ### Vector timing: `speed` is a duration in microseconds
 
 Param0 of `0x0241` and `0x0243` is the time the board takes over that one
@@ -319,6 +424,11 @@ The `speed=` arguments on `begin()`, `lines()`, `jump()` and their `_mm`
 variants are this raw Param0, so they are durations, not rates. Passing one
 number for a run of unequal segments paints them at unequal speeds.
 
+`lines()` paces on the larger of the commanded duration and the measured host
+cost per segment. Pacing on the host cost alone, as it did before this was
+understood, under-sleeps by the whole ratio on a slow mark and overruns the
+queue.
+
 Param4 of the same commands is a delay in microseconds applied at the end point,
 and the vendor software uses it for its four timing controls:
 
@@ -329,6 +439,13 @@ and the vendor software uses it for its four timing controls:
 | a zero-length `0x0241` placed before the first mark | jump delay |
 
 Laser on TC is separate: it rides in `0x0208` Param1, once per job header.
+BslApp names the same four controls Opening Delay, End Delay, Corner Delay and
+Jump Position Delay.
+
+BslApp's own numbers came out of a capture the same way: corner 80 us, end
+100 us, opening 0 us, jump position delay 500 us, and its marks resolved to one
+speed across two segment lengths to 0.01%, a third host obeying the duration
+rule.
 End TC, max jump delay and jump distance limit never appear on the wire at all.
 The vendor host folds them into the Param4 numbers it emits, so a driver that
 wants that behaviour has to compute it the same way.
@@ -489,7 +606,9 @@ behaviour.
   power cycle - a deliberately corrupted digest is ignored silently. Testing the
   unlock path costs one power cycle per experiment.
 - **EP 0x02 overrun clears the ready bit.** `ucPara0` drops to `0x0e` and the
-  board needs re-arming. Pace against `free_cache()`.
+  board needs re-arming. Pace against `free_cache()`. Note that `0x0e` also
+  appears as the normal executing state in vendor captures, so the overrun case
+  is a `0x0e` that stays stuck rather than the value itself.
 - **Pausing with `0x0125`** also takes `ucPara0` to `0x0e`.
 - **`speed=` is a duration in microseconds**, so one value across segments of
   different length paints them at different feed rates. See Vector timing.

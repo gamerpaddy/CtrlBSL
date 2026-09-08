@@ -187,10 +187,21 @@ def unlock(b, indices=None, verbose=True, ep2=True):
 
 
 def encrypt_state(b, verbose=False, nframes=None):
-    """0x0102 GetEncryptState byte 7: 2 = authenticated (LED green), 0 = not."""
+    """0x0102 GetEncryptState byte 7: 2 = authenticated (LED green), 0 = not.
+
+    Returns None when the reply never arrives or comes back short, so a failed
+    read is distinguishable from a board that answered "locked".
+    """
     b.write_cmd(cmd(0x0102))
     time.sleep(0.06)
-    st = b.read_status(usb.EP_CTRL_IN, 1500)[2]
+    try:
+        st = b.read_status(usb.EP_CTRL_IN, 1500)[2]
+    except Exception:
+        st = None
+    if st is None or len(st) < 8:
+        if verbose:
+            print("  encstate unreadable")
+        return None
     if verbose:
         tag = f"  {nframes} frames" if nframes is not None else "  state"
         print(f"{tag}   encstate={st[7]}   0x0102={st.hex(' ')}")

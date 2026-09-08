@@ -211,18 +211,66 @@ class Job:
         """0x0112 GetOutPortState."""
         return self._cmd(S.cmd(0x0112))
 
-    def armed(self):
-        """0x0101 bit 5: board reset and online. Independent of the unlock."""
-        st = self.status()
-        return bool(st and st[2] & 0x20)
+    READY_BIT = 0x20         # byte 2: set when reset and online, clear while busy
 
-    def ensure_unlocked(self):
+    def armed(self):
+        """0x0101 bit 5: board reset and online. Independent of the unlock.
+
+        The same bit clears while the vector queue is executing, so this reads
+        False mid-mark on a board that is perfectly healthy. See busy().
+        """
+        st = self.status()
+        return bool(st and st[2] & self.READY_BIT)
+
+    def busy(self):
+        """True while the vector queue is still executing. None if unreadable.
+
+        Both vendor hosts clear 0x0101 byte 2 bit 5 for exactly the duration of
+        a mark and set it again when the queue drains, over jobs from 34 ms to
+        2.5 s, with no host action in between. That makes it the job-complete
+        indicator this library otherwise lacks. Read from captures rather than
+        measured here, so treat a surprising answer as the flag being wrong
+        rather than the board being stuck, and keep timing your own waits as a
+        fallback.
+        """
+        st = self.status()
+        return None if st is None else not (st[2] & self.READY_BIT)
+
+    def wait_idle(self, timeout=30.0, poll=0.02):
+        """Block until busy() goes False. -> True if it did, False on timeout.
+
+        Never raises and never assumes: on a board that keeps the bit clear this
+        just times out, so callers that cannot tolerate that should keep using a
+        computed duration.
+        """
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if self.busy() is False:
+                return True
+            time.sleep(poll)
+        return False
+
+    def ensure_unlocked(self, attempts=2):
+        """Reset, then replay the unlock until the board reports authenticated.
+
+        The ATSHA204 needs 40-120 ms per command and answers from stale result
+        registers when it is rushed, so a single replay can lose the race on a
+        loaded machine. The latch is sticky and a repeat costs nothing, so this
+        tries again rather than leaving a locked board that marks nothing.
+        """
         self._cmd(S.cmd(0x0105))
         self._cmd(S.cmd(0x0106))
         self._cmd(S.cmd(0x0105))
-        if not self.unlocked():
+        for i in range(max(1, attempts)):
+            if self.unlocked():
+                return True
             unlock(self.b, verbose=False)      # 3-frame ATSHA204 replay
-        return self.unlocked()
+        if self.unlocked():
+            return True
+        warnings.warn(
+            "board still reports locked after %d unlock attempts: it will "
+            "accept commands and emit nothing." % max(1, attempts), stacklevel=2)
+        return False
 
     # ---- configuration --------------------------------------------------
     def _check_spi_clash(self):
@@ -341,12 +389,20 @@ class Job:
         self.b.write_data(blob)
 
     def lines(self, points, speed=200):
-        """Emit lit (laser-on) vectors through `points`, paced to the board."""
+        """Emit lit (laser-on) vectors through `points`, paced to the board.
+
+        `speed` is the per-segment duration in microseconds (see jump()), so the
+        pace has to follow it: a slow mark executes far longer than the host
+        write takes, and pacing on a fixed per-segment cost alone overruns the
+        queue and leaves the board in the stuck 0x0e state. Sleep on whichever
+        is larger, the commanded duration or the measured host cost.
+        """
+        per_seg = max(SEG_TIME, speed * 1e-6)
         for i in range(0, len(points), MAX_SEGS):
             chunk = points[i:i + MAX_SEGS]
             blob = b"".join(S.cmd(0x0243, speed, x, y, 0, 500) for x, y in chunk)
             self.b.write_data(blob)
-            time.sleep(len(chunk) * SEG_TIME * 0.92)
+            time.sleep(len(chunk) * per_seg * 0.92)
 
     def jump(self, x, y, speed=0x2710, delay=0x01F4):
         """Unlit move to (x, y). 0x8000 is centre, full span 0x0000..0xFFFF.
@@ -391,6 +447,10 @@ class Job:
         they are masked off here. Reading the raw 16-bit word (as this did
         before) makes the result jump by 256 per input whenever one changes.
         The count is the low byte only -- a 256-slot queue.
+
+        Vendor captures agree: the word sat at 0x0FBD with the board idle and
+        the low byte walked down to 0x96 under sustained streaming while the
+        high byte stayed 0x0F, so 189 of 256 free is the idle reading.
         """
         st = self.status()
         return (((st[5] << 8) | st[6]) & ~self.IN_MASK & 0xFFFF) if st else 0
@@ -400,10 +460,14 @@ class Job:
     def running(self):
         """True once the marking engine has been started (0x0104).
 
-        This is NOT "still marking" -- it stays set until a reset. No
-        queue-drained or job-complete indicator has been found: free_cache()
-        reads idle even while vectors are executing, so it cannot be polled for
-        completion either. Time your own waits.
+        This is NOT "still marking" -- it stays set until a reset, and
+        free_cache() reads idle even while vectors are executing, so neither can
+        be polled for completion. Time your own waits.
+
+        Byte 2 bit 5 (0x20) does look like the missing job-complete flag: it
+        clears while the queue executes and sets again when it drains, in both
+        BslApp and LightBurn captures, over jobs from 34 ms to 2.5 s. Untested
+        from this library, so nothing here relies on it yet.
         """
         st = self.status()
         return None if st is None else bool(st[2] & self.RUNNING_BIT)
@@ -712,8 +776,20 @@ class Job:
             # pin, which is exactly what this method exists to prevent.
             self.b.write_data(blob)
             time.sleep(0.05)
-        except Exception:
-            pass
+        except Exception as first:
+            # This write is the one that silences the laser, so a stalled pipe
+            # here leaves an output driving. Clear the endpoints and try once
+            # more, and if that fails say so loudly rather than returning as if
+            # the board were quiet.
+            try:
+                self.b.recover()
+                self.b.write_data(blob)
+                time.sleep(0.05)
+            except Exception as second:
+                warnings.warn(
+                    "could not silence the laser (%r, then %r after recover): "
+                    "an output may still be driving. Power-cycle the board."
+                    % (first, second), stacklevel=2)
         finally:
             self._tickle = False
             self._mo = False

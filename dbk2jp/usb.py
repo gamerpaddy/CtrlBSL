@@ -40,6 +40,16 @@ def enumerate_paths():
     return find_devices()
 
 
+class BoardError(RuntimeError):
+    """A transfer the board refused or never completed.
+
+    Raised instead of returning quietly: a write that fails on a stalled pipe
+    looks exactly like a write that worked, and the board then sits there doing
+    nothing while the host reports success. That failure mode cost a full
+    debugging session on Linux before the endpoints were cleared on open.
+    """
+
+
 class Board:
     """Open transport to one DBK2JP board.
 
@@ -82,16 +92,33 @@ class Board:
 
     # ---- framed ---------------------------------------------------------
 
+    @staticmethod
+    def _check(nt, usbd, ep, nbytes):
+        """Raise if the driver reported a failed transfer.
+
+        `nt` is an NTSTATUS from the Windows backend and 0 everywhere else, so
+        any non-zero value is a real failure. The byte count is deliberately not
+        checked: the CYUSB3 IOCTL does not report a write length the same way on
+        every driver build, and a false alarm there would be worse than none.
+        """
+        if nt:
+            raise BoardError(
+                "transfer of %d bytes on EP 0x%02X failed: NTSTATUS 0x%08X, "
+                "USBD 0x%08X. The pipe is probably stalled -- call recover()."
+                % (nbytes, ep, nt & 0xFFFFFFFF, usbd & 0xFFFFFFFF))
+
     def write_cmd(self, cmd):
         """One 12-byte command on EP 0x06."""
         assert len(cmd) == 12
         nt, usbd, _, moved = self._xfer(EP_CTRL_OUT, cmd)
+        self._check(nt, usbd, EP_CTRL_OUT, len(cmd))
         return nt, usbd, moved
 
     def write_data(self, blob):
         """Batched 12-byte commands on EP 0x02."""
         assert len(blob) % 12 == 0 and len(blob) >= 12
         nt, usbd, _, moved = self._xfer(EP_DATA_OUT, blob)
+        self._check(nt, usbd, EP_DATA_OUT, len(blob))
         return nt, usbd, moved
 
     def read_status(self, ep=EP_CTRL_IN, timeout_ms=2000):
@@ -106,13 +133,35 @@ class Board:
         echoed opcode and discarding mismatches is the fix; without it status
         reads intermittently carry another command's payload.
         """
-        self.write_cmd(cmd_bytes)
+        # Status helpers above this (status, unlocked, free_cache, inputs) all
+        # answer None when the board does not, and callers rely on that, so a
+        # refused write is reported the same way here rather than raised. The
+        # data path keeps raising: geometry that never lands must not look like
+        # geometry that did.
+        try:
+            self.write_cmd(cmd_bytes)
+        except BoardError:
+            return None
         time.sleep(settle)
+        recovered = False
         for _ in range(retries):
             try:
                 r = self.read_status(EP_CTRL_IN, timeout_ms)[2]
             except Exception:
-                return None
+                # A timed-out read usually means the reply pipe is halted, and
+                # every later read on it fails the same way. Clear it once and
+                # use the remaining attempts rather than giving up here.
+                if recovered:
+                    return None
+                recovered = True
+                try:
+                    self.recover()
+                    self.write_cmd(cmd_bytes)
+                    time.sleep(settle)
+                except Exception:
+                    return None
+
+                continue
             if len(r) >= 2 and r[:2] == cmd_bytes[:2]:
                 return r
             time.sleep(0.01)

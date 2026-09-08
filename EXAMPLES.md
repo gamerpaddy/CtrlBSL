@@ -495,8 +495,10 @@ with Job(CO2) as j:
 ```
 
 `axis_move()` returns the duration it expects to take and does **not** block.
-There is no job-complete flag on this board, so the mark and the rotation are
-separated by time, not by a status read.
+No job-complete flag is used here, so the mark and the rotation are separated by
+time, not by a status read. Vendor captures do show `0x0101` byte 2 bit 5
+clearing while the queue executes, which is untested from this library; see
+API.md.
 
 A wide rate span hides the ramp: over 200 to 5000 pps it compresses into a
 fraction of a second and looks like an instant start. To see it:

@@ -115,6 +115,12 @@ class Transport:
                 pass
             self.dev = None
 
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def abort_pipe(self, ep):
         return False                  # no libusb equivalent; clear_halt is below
 
@@ -138,6 +144,11 @@ class Transport:
                 data = bytes(got)
                 return 0, 0, data + b"\x00" * (read_len - len(data)), len(data)
             moved = self.dev.write(ep, payload, timeout_ms)
+            if payload and moved != len(payload):
+                # libusb reports the byte count honestly, so a short write here
+                # is a real partial transfer: the board got half a command.
+                raise IOError("short write on EP 0x%02X: %d of %d bytes"
+                              % (ep, moved, len(payload)))
             return 0, 0, b"", moved
         except core.USBTimeoutError:
             raise TimeoutError("transfer timed out")

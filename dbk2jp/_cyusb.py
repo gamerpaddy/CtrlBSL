@@ -229,9 +229,18 @@ class Transport:
             raise ct.WinError(ct.get_last_error())
 
     def close(self):
-        if self.h and self.h != INVALID_HANDLE:
+        if getattr(self, "h", None) and self.h != INVALID_HANDLE:
             kernel32.CloseHandle(self.h)
             self.h = None
+
+    def __del__(self):
+        # A script that never calls close() otherwise leaks the handle until
+        # the process exits, and a second Board() on the same path then opens
+        # against a handle nobody owns.
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _ioctl(self, code, inbuf, insize, outbuf, outsize, timeout_ms=3000):
         ov = OVERLAPPED()
