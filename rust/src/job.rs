@@ -103,6 +103,23 @@ impl Default for PathOpts {
     }
 }
 
+/// What a job would put on the wire.
+#[derive(Clone, Debug)]
+pub struct Settings {
+    pub laser: String,
+    pub code: u8,
+    /// The frequency the board actually produces: the divider is an N+1 counter.
+    pub freq_khz: f64,
+    pub power_pct: f64,
+    pub power_byte: u8,
+    pub mopa_pulse: Option<u32>,
+    pub mo: bool,
+    pub tickle: bool,
+    pub tick_khz: Option<f64>,
+    pub tick_us: Option<f64>,
+    pub verified: bool,
+}
+
 pub struct Job {
     pub board: Board,
     pub field: Field,
@@ -1160,6 +1177,134 @@ impl Job {
         blob.extend_from_slice(&s::cmd(s::CMD_AXIS_GO, 0, 0, 0, 0, 0));
         self.board.write_data(&blob)?;
         Ok(if pps > 0 { pulses as f64 / pps as f64 } else { 0.0 })
+    }
+
+    /// What would go on the wire, as a settings snapshot.
+    pub fn settings(&self) -> Settings {
+        let period = (s::FPGA_CLK_KHZ / self.freq_khz).round();
+        Settings {
+            laser: self.laser.name.to_string(),
+            code: self.laser.code,
+            freq_khz: 48e3 / (period + 1.0), // N+1 counter, so this is the real output
+            power_pct: self.power_pct,
+            power_byte: self.power_byte,
+            mopa_pulse: self.mopa_pulse,
+            mo: self.mo,
+            tickle: self.tickle,
+            tick_khz: if self.laser.tickle { Some(self.tick_khz) } else { None },
+            tick_us: if self.laser.tickle { Some(self.tick_us) } else { None },
+            verified: self.laser.verified,
+        }
+    }
+
+    /// Stop the tickle generator.
+    ///
+    /// It is free-running: it keeps pulsing after a job ends and after the host
+    /// process exits, so it has to be switched off explicitly, and like every
+    /// other parameter it travels the EP 0x02 batch path.
+    pub fn tick_off(&mut self) -> Result<()> {
+        self.tickle = false;
+        self.arm();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&s::cmd(
+            s::CMD_TICK,
+            0,
+            (s::FPGA_CLK_KHZ / self.tick_khz).round() as u16,
+            (self.tick_us * 48.0).round() as u16,
+            0,
+            0,
+        ));
+        blob.extend_from_slice(&s::cmd(s::CMD_JUMP, 200, 0x4000, CENTRE, 0, 500));
+        self.board.write_data(&blob)?;
+        sleep(Duration::from_millis(50));
+        self.ask(s::cmd(s::CMD_RESET, 0, 0, 0, 0, 0));
+        Ok(())
+    }
+
+    /// Sustained laser PWM for scope work, closed-loop against the board's own
+    /// free-cache counter. Open-loop pacing drains the queue between chunks and
+    /// the output visibly drops back to tickle-only about once a second.
+    /// Returns the number of vectors sent.
+    pub fn pwm_burst(&mut self, seconds: f64, speed: u16, span: (u16, u16), margin: u16) -> Result<usize> {
+        self.begin((span.0, CENTRE), speed)?;
+        let t0 = Instant::now();
+        let mut n = 0usize;
+        while t0.elapsed().as_secs_f64() < seconds {
+            let free = self.free_cache();
+            let want = (free.saturating_sub(margin) as usize).min(MAX_SEGS);
+            if want < 64 {
+                sleep(Duration::from_millis(10)); // queue full enough, let it drain
+                continue;
+            }
+            let mut blob = Vec::with_capacity(want * 12);
+            for i in 0..want {
+                let x = if i % 2 == 0 { span.1 } else { span.0 };
+                blob.extend_from_slice(&s::cmd(s::CMD_MARK, speed, x, CENTRE, 0, 500));
+            }
+            self.board.write_data(&blob)?;
+            n += want;
+        }
+        Ok(n)
+    }
+
+    /// Analog power out, 0x0207 Param0 = a 12-bit word (CON3 pin 15 / DA1).
+    ///
+    /// NOT CONFIRMED WORKING: produced no voltage on this board under every
+    /// condition tried. The gate is believed to be a board-side analog enable
+    /// that no observed command writes.
+    pub fn dac(&mut self, value12: u16, mark: bool) -> Result<u16> {
+        self.arm();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&s::cmd(
+            s::CMD_LASER_TYPE,
+            (self.laser.code as u16) << 8,
+            0,
+            0,
+            0,
+            0,
+        ));
+        blob.extend_from_slice(&s::set_power_raw(self.freq_khz, 0x80, 0, 0.0));
+        blob.extend_from_slice(&s::cmd(0x0207, value12 & 0x0FFF, 0, 0, 0, 0));
+        blob.extend_from_slice(&s::cmd(s::CMD_LASER_GATE, 0, 0, 0, 0, 0));
+        if mark {
+            blob.extend_from_slice(&s::cmd(s::CMD_JUMP, 200, 0x4000, CENTRE, 0, 500));
+        }
+        self.live = true;
+        self.board.write_data(&blob)?;
+        Ok(value12 & 0x0FFF)
+    }
+
+    /// Timed output pulse via 0x2F82 on EP 0x02, duration scaled by 2000.
+    /// UNTESTED.
+    pub fn out_pulse(&mut self, port: u8, value: u8, ms: u32) -> Result<()> {
+        let ticks = ms * 2000;
+        let blob = s::cmd(
+            s::CMD_PORT_PULSE,
+            ((port as u16) << 8) | if ms > 0 { 1 } else { 0 },
+            ((value as u16) << 8) | ((ticks >> 24) & 0xFF) as u16,
+            (((ticks >> 8) & 0xFF) | (((ticks >> 16) & 0xFF) << 8)) as u16,
+            ((ms as i64 * -0x3000) & 0xFFFF) as u16,
+            0,
+        );
+        self.board.write_data(&blob)?;
+        Ok(())
+    }
+
+    /// 0x2F84 laser port switch. Purpose not established; a candidate for
+    /// routing or enabling the analog out.
+    pub fn laser_port_switch(&mut self, p1: u16, p2: u16, p3: u16, p4: u16, p5: u16, p6: u16) -> Result<()> {
+        let _ = p2;
+        self.arm();
+        let blob = s::cmd(
+            0x2F84,
+            (p1.wrapping_mul(0x100)).wrapping_add(p4),
+            p5.wrapping_mul(0x300),
+            p3.wrapping_mul(2),
+            p6.wrapping_mul(2),
+            0,
+        );
+        self.board.write_data(&blob)?;
+        Ok(())
     }
 
     // ---- safety ---------------------------------------------------------

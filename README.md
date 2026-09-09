@@ -10,9 +10,9 @@ coexists with whatever is already installed and any other software you have
 keeps working alongside it. On Linux and macOS it talks plain libusb instead.
 
 **Two front ends, one driver.** `rust/` is the implementation: a dependency-free
-crate on Windows, with PyO3 bindings published as `dbk2jp_rs`. `dbk2jp/` is the
-original Python package, kept as the reference implementation; the two agree
-frame for frame.
+crate on Windows, a command line binary, and PyO3 bindings published as
+`dbk2jp_rs`, so Python scripts drive the same code. The original Python
+implementation lives on the `main` branch.
 
 | Platform | Rust needs | Python needs | State |
 |---|---|---|---|
@@ -77,16 +77,19 @@ cd rust && cargo test && maturin develop --release
 `cargo test` runs 22 offline checks with no hardware attached. `maturin develop`
 builds the extension into the active virtualenv; `pip install maturin` first.
 
-The command line lives in the reference Python package:
+The command line is a second binary from the same crate:
 
 ```bash
-python -m dbk2jp devices          # list boards
-python -m dbk2jp status           # unlock state, inputs, free cache
-python -m dbk2jp inputs 5         # live input view with edge timings
-python -m dbk2jp out 1 1          # set OUT1 high
-python -m dbk2jp jump 0x4000 0x8000
-python -m dbk2jp field             # scan field, creates markcfg0 if missing
-python -m dbk2jp field size_mm=110 # adjust and save
+cargo build --release --bin dbk2jp
+
+dbk2jp devices                # list boards
+dbk2jp status                 # unlock state, inputs, free cache, busy
+dbk2jp inputs 5               # watch the opto inputs
+dbk2jp out 1 1                # set OUT1 high
+dbk2jp jump 0x4000 0x8000     # move the galvos, laser off
+dbk2jp field                  # scan field, creates markcfg0 if missing
+dbk2jp field size_mm=110      # adjust and save
+dbk2jp off                    # silence every laser output
 ```
 
 ---
@@ -206,7 +209,7 @@ Verified on hardware with a scope.
 | MOPA | frame verified on the wire, optical result not. Type code 0x55 mutes every output on the board tested |
 | UV, green, YAG | type codes unverified |
 | macOS | backend written, still to be tried |
-| **.cor files** | **unfinished feature.** On hold until a real `.cor` turns up to test against, so `load_cor()` raises rather than guessing. The transform side is done: calibrate with `GridCorrection.from_points()` meanwhile |
+| **.cor files** | not ported. The format was never recovered, so the Python scaffold that read one and refused to guess is on `main` rather than here. Field size, offsets, aspect, mirror and swap all work |
 | Galvo distortion terms | `GALVODISTOR`, `GALVOHORVER`, `GALVOTRAPEDISTOR` are all `1.0` (identity) in the available config, so the conventional model used for them is unverified |
 | **EMSTOP** | sits at 5 V throughout every test. The command set leaves it alone and the software here leaves it alone, so it looks like a pure hardware interlock line, readable and drivable only from hardware |
 | SGIN0..2 | OR'd into one bit, so you learn *that* a fault fired, while *which* one stays hidden |
@@ -228,7 +231,7 @@ leaves it running.**
 To stop everything, at any time:
 
 ```bash
-python -m dbk2jp off
+dbk2jp off
 ```
 
 ```python
@@ -259,13 +262,13 @@ pulsing after the job ends.
 | | |
 |---|---|
 | `rust/` | the implementation: dependency-free on Windows, PyO3 bindings as `dbk2jp_rs`, 22 offline tests. See [rust/README.md](rust/README.md) |
-| `dbk2jp/` | the original Python package, kept as the reference implementation and still runs. Holds the command line and the `.cor` scaffold |
+| `rust/src/bin/dbk2jp.rs` | the command line, built with `cargo build --release --bin dbk2jp` |
 | `API.md` | the full surface and every measured protocol fact |
 | `EXAMPLES.md` | per-laser-type examples and machine integration |
 
-The two implementations agree frame for frame, which is checked by building the
-extension and comparing its output against the Python package. `main` keeps the
-Python-only history.
+`main` keeps the Python implementation and its history. Before it was removed
+from this branch the two were compared frame for frame, field conversion for
+field conversion, and they agreed.
 
 Nothing in the Rust port has driven a laser yet: treat its first hardware run as
 a bench test.

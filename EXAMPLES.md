@@ -4,11 +4,10 @@ Runnable snippets for the DBK2JP. Every one of these was executed against a real
 board; what varies is whether a laser of that type was attached to confirm the
 optical side. See [API.md](API.md) for the full surface.
 
-These use the reference Python package, `dbk2jp`. The same calls work against
-the Rust extension, `dbk2jp_rs`, with two differences: the laser is a string, so
-`Job(CO2)` becomes `Job(laser="co2")`, and warnings arrive from `j.warnings()`
-rather than the `warnings` module. The Rust API itself is in
-[rust/README.md](rust/README.md).
+These call `dbk2jp_rs`, the Python extension built from the Rust crate:
+`maturin develop --release` in `rust/`. The laser is a string, and warnings come
+back from `j.warnings()` rather than through the `warnings` module. The Rust API
+itself is in [rust/README.md](rust/README.md).
 
 Coordinates are 16-bit. `0x8000` is field centre, `0x0000` and `0xFFFF` are the
 corners. **`speed` is the time the board takes over one segment, in
@@ -34,9 +33,9 @@ primed between marks. `Job(CO2)` enables it by default at 5 kHz / 1 us, since a
 tube normally wants it.
 
 ```python
-from dbk2jp import Job, CO2
+import dbk2jp_rs as d
 
-with Job(CO2) as j:
+with d.Job(laser="co2") as j:
     j.configure(freq_khz=20, power_pct=40)      # 20 kHz, 40% duty
                                                 # tickle already on, 5 kHz / 1 us
     j.begin(start=(0x4000, 0x4000), speed=300)
@@ -67,7 +66,7 @@ both independent of the marking PWM. It is on by default for CO2 at 5 kHz / 1 us
 Set both at once through `configure()`:
 
 ```python
-with Job(CO2) as j:
+with d.Job(laser="co2") as j:
     j.configure(freq_khz=20, power_pct=40,      # marking PWM
                 tick_khz=10.0, tick_us=2.0)     # tickle
     j.begin(start=(0x4000, 0x8000), speed=300)
@@ -115,7 +114,7 @@ Warm the tube before marking:
 ```python
 import time
 
-with Job(CO2) as j:
+with d.Job(laser="co2") as j:
     j.configure(freq_khz=20, power_pct=40, tick_khz=5.0, tick_us=1.0)
     j.begin(start=(0x4000, 0x8000), speed=300)  # tickle starts here
     time.sleep(2.0)                             # let the tube settle
@@ -126,7 +125,7 @@ Turn it off. It is **free-running**: it keeps pulsing after the job ends and
 after your script exits.
 
 ```python
-with Job(CO2) as j:
+with d.Job(laser="co2") as j:
     j.tick_off()
 ```
 
@@ -137,7 +136,7 @@ snippet above clears it.
 Marking with no tickle at all, leaving the shape configured:
 
 ```python
-with Job(CO2) as j:
+with d.Job(laser="co2") as j:
     j.configure(freq_khz=20, power_pct=40, tickle=False)
     j.begin(start=(0x4000, 0x8000), speed=300)
     j.lines([(0xC000, 0x8000)], speed=300)
@@ -159,9 +158,9 @@ latches it and strobes `PLATCH` on every change, so it is static: no marking run
 is needed to set it, and it persists until you change it.
 
 ```python
-from dbk2jp import Job, FIBER
+import dbk2jp_rs as d
 
-with Job(FIBER) as j:
+with d.Job(laser="fiber") as j:
     j.configure(freq_khz=30, power_byte=0xC0,   # 192 of 255
                 mo=True)                        # MO and PA enable
     j.begin(start=(0x4000, 0x4000), speed=400)
@@ -185,10 +184,10 @@ known level, or for bit-level testing of the P0..P7 wiring.
 
 This leaves a **live signal on the laser control output** until it is cleared.
 It is a power level that stays put. Clear it with `j.laser_off()`, or let
-`close()` do it, or run `python -m dbk2jp off`.
+`close()` do it, or run `dbk2jp off`.
 
 ```python
-with Job(FIBER) as j:
+with d.Job(laser="fiber") as j:
     j.power_byte(0x01)           # P0 only
     j.power_byte(0x80)           # P7 only
     j.power_byte(0xFF)           # all bits
@@ -203,7 +202,7 @@ enables asserted before they emit. They are off by default here, since they are
 amplifier enables on the laser side:
 
 ```python
-with Job(FIBER) as j:
+with d.Job(laser="fiber") as j:
     j.configure(freq_khz=30, power_byte=0xC0, mo=True)
     j.begin(start=(0x4000, 0x4000), speed=400)
     j.lines([(0xC000, 0x4000), (0x4000, 0x4000)], speed=400)
@@ -225,9 +224,9 @@ under `0x11` drives all four. The pulse width command works normally under the
 fiber code.
 
 ```python
-from dbk2jp import Job, FIBER
+import dbk2jp_rs as d
 
-with Job(FIBER) as j:
+with d.Job(laser="fiber") as j:
     j.configure(freq_khz=30, power_byte=0x78, mo=True)
     j.mopa_pulse(100)                  # nanoseconds
     j.begin(start=(0x4000, 0x8000), speed=400)
@@ -256,7 +255,7 @@ Sweeping widths at a fixed power, the usual way to find a setting for a
 material:
 
 ```python
-with Job(FIBER) as j:
+with d.Job(laser="fiber") as j:
     j.configure(freq_khz=30, power_byte=0x78, mo=True)
     for i, ns in enumerate([50, 100, 150, 200, 250, 350]):
         j.configure(mopa_pulse=ns)     # goes out with the next job header
@@ -276,14 +275,14 @@ Driven like CO2 (PWM duty) but with **no tickle**. `configure(tickle=True)`
 raises for these types.
 
 ```python
-from dbk2jp import Job, UV, GREEN
+import dbk2jp_rs as d
 
-with Job(UV) as j:
+with d.Job(laser="uv") as j:
     j.configure(freq_khz=30, power_pct=35)
     j.begin(start=(0x4000, 0x4000), speed=250)
     j.lines([(0xC000, 0x4000), (0xC000, 0xC000)], speed=250)
 
-with Job(GREEN) as j:
+with d.Job(laser="green") as j:
     j.configure(freq_khz=30, power_pct=35)
     j.begin(start=(0x4000, 0x4000), speed=250)
     j.lines([(0xC000, 0x4000), (0xC000, 0xC000)], speed=250)
@@ -301,9 +300,9 @@ PWM duty, no tickle. Q-switched YAG lasers normally want first-pulse
 suppression, which **this board appears to leave alone**.
 
 ```python
-from dbk2jp import Job, YAG
+import dbk2jp_rs as d
 
-with Job(YAG) as j:
+with d.Job(laser="yag") as j:
     j.configure(freq_khz=20, power_pct=40)
     j.begin(start=(0x4000, 0x4000), speed=250)
     j.lines([(0xC000, 0x4000), (0xC000, 0xC000)], speed=250)
@@ -322,14 +321,14 @@ elsewhere.
 The `0x0218` command is packed if you want to keep digging:
 
 ```python
-from dbk2jp import Job, YAG, cmd
+import dbk2jp_rs as d
 
 FPKTIME, QS = 20, 7          # QS is 3 when ENABLECLOSEQSWTICH is set, else 7
 
-with Job(YAG) as j:
+with d.Job(laser="yag") as j:
     j.configure(freq_khz=20, power_pct=40)
     j.begin(start=(0x4000, 0x8000), speed=250)
-    j.b.write_data(cmd(0x0218, (QS << 8) | (FPKTIME >> 8),
+    j.b.write_data(d.cmd(0x0218, (QS << 8) | (FPKTIME >> 8),
                        (FPKTIME & 0xFF) << 8, 0, 0, 0))
     j.lines([(0xC000, 0x8000)], speed=250)
 ```
@@ -343,12 +342,12 @@ machine's own `markcfg0`, so a dimension means the same thing here as anywhere
 else on that machine.
 
 ```python
-from dbk2jp import Job, Field, CO2
+import dbk2jp_rs as d
 
-field = Field.from_markcfg("markcfg0")      # FIELDSIZE, offsets, aspect, mirror
+field = d.Field.from_markcfg("markcfg0")      # FIELDSIZE, offsets, aspect, mirror
 print(field)                                # <Field 100 mm, offset (0, 0), ...>
 
-with Job(CO2, field=field) as j:
+with d.Job(laser="co2", field=field) as j:
     j.configure(freq_khz=20, power_pct=40)
     j.begin_mm(start=(-20, -20))            # a 40 mm square, centred
     j.lines_mm([(20, -20), (20, 20), (-20, 20), (-20, -20)])
@@ -360,7 +359,7 @@ Not every machine ships with a `markcfg0`. `load_or_create()` writes a default
 one the first time and loads it thereafter:
 
 ```python
-field = Field.load_or_create("markcfg0", size_mm=110.0)
+field = d.Field.load_or_create("markcfg0", 110.0)
 if field.created:
     print("wrote a fresh markcfg0, adjust it for this machine")
 ```
@@ -373,7 +372,8 @@ field.set(size_mm=110.0,
           offset_mm=(-1.5, 0.25),
           aspect=(100.0, 99.4),      # per-axis scale in percent
           negate=(True, False),      # mirror X
-          swap_xy=False).save()
+          swap_xy=False)
+field.save()                         # back to the file it was loaded from
 ```
 
 `set()` validates: an unknown factor, a zero field size or an aspect of 0%
@@ -382,10 +382,10 @@ raises rather than writing a config that would fail.
 From the command line, without writing any code:
 
 ```bash
-python -m dbk2jp field                              # show, creating if needed
-python -m dbk2jp field size_mm=110                  # adjust and save
-python -m dbk2jp field aspect=100,99.4 negate=1,0
-python -m dbk2jp field /path/to/markcfg0 size_mm=175
+dbk2jp field                                  # show, creating if needed
+dbk2jp field size_mm=110                      # adjust and save
+dbk2jp field aspect_x=100 aspect_y=99.4 negate_x=1
+dbk2jp field /path/to/markcfg0 size_mm=175
 ```
 
 Or skip the file entirely and state the field inline:
@@ -399,11 +399,12 @@ field = Field(size_mm=110.0, offset_mm=(0.0, 0.0))
 Mark a square of known nominal size, measure it, and scale:
 
 ```python
-field = Field.load_or_create("markcfg0", size_mm=100.0)
+field = d.Field.load_or_create("markcfg0", 100.0)
 
 # asked for 40 mm, measured 39.6 across X and 40.2 across Y
 field.set(aspect=(field.aspect[0] * 40.0 / 39.6,
-                  field.aspect[1] * 40.0 / 40.2)).save()
+                  field.aspect[1] * 40.0 / 40.2))
+field.save()
 ```
 
 Converting by hand:
@@ -450,45 +451,29 @@ A galvo head paints a slightly distorted square, and machines ship a per-head
 correction table applied on the host. This board's command set leaves that to
 the host, so it has to happen here.
 
-**Reading a `.cor` file is an unfinished feature.** It is on hold until a real
-one turns up to test against: a sample is still needed and the tool that
-generates them refused to run here, leaving an implementation without a
-reference to check itself against. `load_cor()` raises rather than returning a transform
-that might be subtly wrong, since a bad correction still puts the beam
-somewhere plausible.
+**Correction from a `.cor` file is not ported.** The format was never recovered,
+so rather than guess at a transform that would put the beam somewhere plausible
+but wrong, the scaffold that read the file and reported its shape stayed on the
+`main` branch with the Python implementation.
+
+What the field does handle is exact, read from `markcfg0`: size, offsets,
+per-axis aspect, mirror and axis swap.
 
 ```python
-from dbk2jp import load_cor
-load_cor("machine.cor")
-# NotImplementedError: machine.cor: 4096 bytes, looks like text. .cor parsing
-# is an unfinished feature -- see dbk2jp/cor.py
-```
+import dbk2jp_rs as d
 
-It still reads the file and reports its shape, which is the first thing needed
-to finish the feature.
+field = d.Field.load_or_create("markcfg0", 110.0)
+print(field, "counts per mm:", 1 / field.mm_per_count)
 
-**Correcting a field works today**, by measuring points yourself, which is how
-calibration works anyway:
-
-```python
-from dbk2jp import Field, GridCorrection, Job, CO2
-
-# mark a grid, measure where the marks actually landed
-pairs = [((-20, -20), (-19.4, -20.3)),
-         (( 20, -20), ( 20.6, -20.2)),
-         (( 20,  20), ( 20.5,  19.6)),
-         ((-20,  20), (-19.5,  19.7))]
-
-field = Field(size_mm=100.0, correction=GridCorrection.from_points(pairs))
-
-with Job(CO2, field=field) as j:
+with d.Job(laser="co2", field=field) as j:
     j.configure(freq_khz=20, power_pct=40)
     j.begin_mm(start=(-20, -20))
-    j.lines_mm([(20, -20), (20, 20), (-20, 20), (-20, -20)])
+    j.path_mm([(-20, -20), (20, -20), (20, 20), (-20, 20), (-20, -20)],
+              mm_s=600)
 ```
 
-`PolyCorrection(cx, cy)` is there too, matching the bivariate-polynomial shape a
-coefficient fit implies, for when the coefficients are known.
+A measured correction, mapping commanded points to where the marks actually
+landed, is worth having and is the obvious next thing to add here.
 
 ---
 
@@ -503,9 +488,9 @@ These are independent of laser type.
 
 ```python
 import time
-from dbk2jp import Job, CO2
+import dbk2jp_rs as d
 
-with Job(CO2) as j:
+with d.Job(laser="co2") as j:
     j.configure(freq_khz=20, power_pct=40)
 
     for part in range(12):
@@ -536,7 +521,7 @@ and 0 when driven, so the switch closing is a falling edge.
 
 ```python
 import time
-from dbk2jp import Job
+import dbk2jp_rs as d
 
 with Job() as j:
     while j.input_pin(0):                       # still off the switch
@@ -552,9 +537,9 @@ to it.
 
 ```python
 import time
-from dbk2jp import Job, CO2
+import dbk2jp_rs as d
 
-with Job(CO2) as j:
+with d.Job(laser="co2") as j:
     j.configure(freq_khz=20, power_pct=40)
     while True:
         while j.remark():                       # idle high, wait for the pull low
@@ -571,9 +556,9 @@ with Job(CO2) as j:
 ### Stopping on a laser fault
 
 ```python
-from dbk2jp import Job, CO2
+import dbk2jp_rs as d
 
-with Job(CO2) as j:
+with d.Job(laser="co2") as j:
     j.configure(freq_khz=20, power_pct=40)
     j.begin(start=(0x4000, 0x4000), speed=300)
     j.lines([(0xC000, 0x4000), (0xC000, 0xC000)], speed=300)
@@ -589,7 +574,7 @@ j.laser_off()      # marking PWM, tickle and gate, all off
 ```
 
 ```bash
-python -m dbk2jp off
+dbk2jp off
 ```
 
 Laser outputs are levels and they latch. **A plain reset leaves them live.**
@@ -609,7 +594,7 @@ readable and assertable only in hardware. It has to break the circuit there.
 ### Reading the board
 
 ```python
-from dbk2jp import Job
+import dbk2jp_rs as d
 
 with Job(unlock_now=False) as j:                # read-only, leaves state alone
     print(j.input_pin(0), j.input_pin(1), j.input_pin(2))

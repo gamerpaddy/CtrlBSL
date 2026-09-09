@@ -1,22 +1,22 @@
 # `dbk2jp` - API reference
 
 This documents the driver, not one language's spelling of it. The
-implementation is the Rust crate in `rust/`; `dbk2jp_rs` is its Python
-extension, and `dbk2jp/` is the original Python package kept as a reference.
-Everything about the protocol, the measurements and the hardware behaviour
-below applies to all three.
+implementation is the Rust crate in `rust/`, and `dbk2jp_rs` is its Python
+extension. Everything about the protocol, the measurements and the hardware
+behaviour below applies to both. The original Python implementation lives on the
+`main` branch.
 
 Where a name differs, the mapping is:
 
-| Rust | Python (`dbk2jp_rs`) | Reference package (`dbk2jp`) |
-|---|---|---|
-| `Job::new(board, "co2", field)` | `Job(laser="co2", field=...)` | `Job(CO2, field=...)` |
-| `Speed::Micros(1000)` | `speed=1000` | `speed=1000` |
-| `Speed::MmPerSec(600.0)` | `mm_s=600` | `mm_s=600` |
-| `PathOpts { wiggle, .. }` | keyword arguments | keyword arguments |
-| `Result<T, String>` | raises `ValueError` | raises `ValueError` |
-| `job.warnings` | `j.warnings()` | Python `warnings` module |
-| `Drop` silences the laser | `close()` / `with` | `close()` / `atexit` |
+| Rust | Python (`dbk2jp_rs`) |
+|---|---|
+| `Job::new(board, "co2", field)` | `Job(laser="co2", field=...)` |
+| `Speed::Micros(1000)` | `speed=1000` |
+| `Speed::MmPerSec(600.0)` | `mm_s=600` |
+| `PathOpts { wiggle, .. }` | keyword arguments |
+| `Result<T, String>` | raises `ValueError` |
+| `job.warnings` | `j.warnings()` |
+| `Drop` silences the laser | `close()`, or a `with` block |
 
 Rust returns errors rather than raising, and carries warnings on the `Job` for
 the caller to read, since it has no warnings module. Everything else lines up
@@ -36,10 +36,10 @@ per laser type, see [EXAMPLES.md](EXAMPLES.md).
   inline, so `cargo build` fetches no crates at all. Linux and macOS build with
   `--features libusb`. `--features python` adds PyO3 for the extension module.
 - **Python**: 3.8+. `dbk2jp_rs` is the compiled extension, built with
-  `maturin develop --release`; the `dbk2jp/` package needs no build step.
-- **Windows**: no third-party packages either way (`ctypes` + `winreg` in
-  Python), and the board bound to Cypress's **CYUSB3** driver. No admin rights.
-- **Linux**: `pip install pyusb` for the Python package, libusb for both.
+  `maturin develop --release`. One `abi3` wheel covers every version from 3.8 up.
+- **Windows**: the board bound to Cypress's **CYUSB3** driver. No admin rights,
+  and nothing to install beyond the toolchain.
+- **Linux**: libusb, and the crate built with `--features libusb`.
   Verified on hardware:
   enumeration, unlock, status and marking. macOS uses the same backend and is
   still to be tried. Linux needs usbfs access, so either root or a udev rule:
@@ -61,7 +61,7 @@ it could clean up.
 ```rust
 use dbk2jp_rs::{Board, Job};
 
-let mut j = Job::new(Board::open(0)?, "co2", None)?;
+let mut j = Job::new(Board::open(0)?, "co2", None)?;   // "fiber", "mopa", ...
 j.ensure_unlocked(2);
 j.configure(Some(20.0), Some(50.0), None, None, None, None)?;
 j.jump(0x4000, 0x8000, 0x2710, 0x01F4)?;
@@ -75,8 +75,8 @@ with d.Job() as j:                  # opens, unlocks, leaves the board armed
     j.jump(0x4000, 0x8000)
 ```
 
-The reference Python package needs no build at all: put the `dbk2jp/` folder
-next to your script and `from dbk2jp import Job`.
+Build the extension with `maturin develop --release` in `rust/`, or the crate
+alone with `cargo build --release`.
 
 ---
 
@@ -94,35 +94,38 @@ matters if you build commands yourself.
 
 ## Layout
 
-| Rust | Python | What it holds |
-|---|---|---|
-| `rust/src/usb.rs` | `dbk2jp/usb.py` | `Board`: discovery, command framing, backend selection |
-| `rust/src/backend_win.rs` | `dbk2jp/_cyusb.py` | Windows backend -- CYUSB3.sys IOCTLs |
-| `rust/src/backend_libusb.rs` | `dbk2jp/_libusb.py` | Linux/macOS backend -- bulk transfers, verified on Linux |
-| `rust/src/protocol.rs` | `dbk2jp/protocol.py` | the 12-byte `tagSeaCMD` wire format, opcode constants, parameter packing |
-| `rust/src/unlock.rs` | `dbk2jp/unlock.py` | the 3-frame ATSHA204 replay that turns the 加密 LED green |
-| `rust/src/field.rs` | `dbk2jp/field.py` | millimetres to galvo counts (`Field`), `markcfg0` reader |
-| `rust/src/laser.rs` | `dbk2jp/laser.py` | laser types and how each one is driven |
-| -- | `dbk2jp/cor.py` | `.cor` optical correction (scaffold, format not recovered) |
-| `rust/src/job.rs` | `dbk2jp/job.py` | the high-level API (`Job`) |
-| `rust/src/python.rs` | -- | the PyO3 wrapper, the only file that knows about Python |
-| `rust/tests/streaming.rs` | -- | geometry and timing against a fake transport |
-| -- | `dbk2jp/__main__.py` | `python -m dbk2jp …` |
+| Module | What it holds |
+|---|---|
+| `rust/src/usb.rs` | `Board`: discovery, command framing, backend selection |
+| `rust/src/backend_win.rs` | Windows backend -- CYUSB3.sys IOCTLs, declared inline |
+| `rust/src/backend_libusb.rs` | Linux/macOS backend -- bulk transfers, verified on Linux |
+| `rust/src/protocol.rs` | the 12-byte `tagSeaCMD` wire format, opcode constants, parameter packing |
+| `rust/src/unlock.rs` | the 3-frame ATSHA204 replay that turns the 加密 LED green |
+| `rust/src/field.rs` | millimetres to galvo counts (`Field`), `markcfg0` reader |
+| `rust/src/laser.rs` | laser types and how each one is driven |
+| `rust/src/job.rs` | the high-level API (`Job`) |
+| `rust/src/python.rs` | the PyO3 wrapper, the only file that knows about Python |
+| `rust/src/bin/dbk2jp.rs` | the command line |
+| `rust/tests/streaming.rs` | geometry and timing against a fake transport |
 
-`.cor` parsing and the command line live only in the Python package so far.
+`.cor` parsing is not ported: the format was never recovered, so the scaffold
+that read a file and refused to guess stayed on `main`.
 
 ---
 
 ## Command line
 
 ```bash
-python -m dbk2jp devices           # list DBK2JP interface paths
-python -m dbk2jp status            # unlock state, inputs, free cache
-python -m dbk2jp unlock [set]      # replay the auth frames
-python -m dbk2jp inputs [secs]     # live input/SGIN view with edge timings
-python -m dbk2jp out <port> <0|1>  # set an output port
-python -m dbk2jp jump <x> <y>      # move the galvos
-python -m dbk2jp field [path] [key=value ...]   # scan field, creates if missing
+cargo build --release --bin dbk2jp        # once
+
+dbk2jp devices              # list DBK2JP interface paths
+dbk2jp status               # unlock state, inputs, free cache, busy
+dbk2jp unlock               # replay the auth frames
+dbk2jp inputs [secs]        # watch the opto inputs
+dbk2jp out <port> <0|1>     # set an output port
+dbk2jp jump <x> <y>         # move the galvos, laser off
+dbk2jp field [path] [k=v]   # scan field, creates markcfg0 if missing
+dbk2jp off                  # silence every laser output
 ```
 
 ---
@@ -322,7 +325,7 @@ Job(CO2, field=Field.load_or_create("markcfg0"))
 | `field.save(path=None)` | write back, preserving keys beyond the ones this library reads |
 | `field.as_markcfg()` | the factors as config key/value strings |
 
-Also `python -m dbk2jp field [path] [key=value ...]`.
+Also `dbk2jp field [path] [key=value ...]` on the command line.
 
 | Method | Notes |
 |---|---|
@@ -333,9 +336,9 @@ Also `python -m dbk2jp field [path] [key=value ...]`.
 Out-of-field coordinates raise unless `clamp=True`. `Field` carries field size,
 offsets, per-axis aspect, mirror and axis swap (all exact) plus the barrel,
 horizontal-vertical and trapezoid terms (conventional model, unverified: every
-one is `1.0` in the available config). `Field.correction` takes a `Correction` from `cor.py`. Reading a `.cor` file is
-an **unfinished feature**; correcting a field from measured points works today.
-See EXAMPLES.md.
+one is `1.0` in the available config). Optical correction from a `.cor` file is
+not ported: the format was never recovered, and the Python scaffold for it
+stayed on `main`.
 
 ### Marking
 

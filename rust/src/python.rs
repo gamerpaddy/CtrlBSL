@@ -81,8 +81,66 @@ impl PyField {
         self.inner.contains(x_mm, y_mm)
     }
 
-    fn save(&self, path: &str) -> PyResult<()> {
-        self.inner.save(path).map_err(err)
+    /// Change factors in place, with validation.
+    #[pyo3(signature = (size_mm=None, offset_mm=None, aspect=None, negate=None, swap_xy=None))]
+    fn set(
+        &mut self,
+        size_mm: Option<f64>,
+        offset_mm: Option<(f64, f64)>,
+        aspect: Option<(f64, f64)>,
+        negate: Option<(bool, bool)>,
+        swap_xy: Option<bool>,
+    ) -> PyResult<()> {
+        let mut f = self.inner.clone();
+        if let Some(v) = size_mm {
+            f.size_mm = v;
+        }
+        if let Some(v) = offset_mm {
+            f.offset_mm = v;
+        }
+        if let Some(v) = aspect {
+            f.aspect = v;
+        }
+        if let Some(v) = negate {
+            f.negate = v;
+        }
+        if let Some(v) = swap_xy {
+            f.swap_xy = v;
+        }
+        f.validate().map_err(PyValueError::new_err)?;
+        self.inner = f;
+        Ok(())
+    }
+
+    /// Write these factors back, preserving keys this library ignores.
+    /// Defaults to the file it was loaded from.
+    #[pyo3(signature = (path=None))]
+    fn save(&self, path: Option<&str>) -> PyResult<()> {
+        let target = path
+            .map(|p| p.to_string())
+            .or_else(|| self.inner.path.clone())
+            .ok_or_else(|| PyValueError::new_err("no path: this field was built inline, pass one"))?;
+        self.inner.save(&target).map_err(err)
+    }
+
+    #[getter]
+    fn offset_mm(&self) -> (f64, f64) {
+        self.inner.offset_mm
+    }
+
+    #[getter]
+    fn aspect(&self) -> (f64, f64) {
+        self.inner.aspect
+    }
+
+    #[getter]
+    fn negate(&self) -> (bool, bool) {
+        self.inner.negate
+    }
+
+    #[getter]
+    fn swap_xy(&self) -> bool {
+        self.inner.swap_xy
     }
 
     #[getter]
@@ -482,6 +540,190 @@ impl PyJob {
         py.detach(|| self.inner.out_state())
     }
 
+    /// What would go on the wire, as a dict.
+    fn settings(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let s = self.inner.settings();
+        let d = PyDict::new(py);
+        d.set_item("laser", s.laser)?;
+        d.set_item("code", s.code)?;
+        d.set_item("freq_khz", s.freq_khz)?;
+        d.set_item("power_pct", s.power_pct)?;
+        d.set_item("power_byte", s.power_byte)?;
+        d.set_item("mopa_pulse", s.mopa_pulse)?;
+        d.set_item("mo", s.mo)?;
+        d.set_item("tickle", s.tickle)?;
+        d.set_item("tick_khz", s.tick_khz)?;
+        d.set_item("tick_us", s.tick_us)?;
+        d.set_item("verified", s.verified)?;
+        Ok(d.into())
+    }
+
+    /// Stop the free-running tickle generator.
+    fn tick_off(&mut self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.inner.tick_off()).map_err(err)
+    }
+
+    /// Sustained laser PWM for scope work, paced off the board's own counter.
+    #[pyo3(signature = (seconds=10.0, speed=200, span=(0x4000, 0xC000), margin=48))]
+    fn pwm_burst(&mut self, py: Python<'_>, seconds: f64, speed: u16, span: (u16, u16), margin: u16) -> PyResult<usize> {
+        py.detach(|| self.inner.pwm_burst(seconds, speed, span, margin)).map_err(err)
+    }
+
+    /// Analog power out. NOT CONFIRMED WORKING on the board tested.
+    #[pyo3(signature = (value12, mark=false))]
+    fn dac(&mut self, py: Python<'_>, value12: u16, mark: bool) -> PyResult<u16> {
+        py.detach(|| self.inner.dac(value12, mark)).map_err(err)
+    }
+
+    /// Timed output pulse. UNTESTED.
+    fn out_pulse(&mut self, py: Python<'_>, port: u8, value: u8, ms: u32) -> PyResult<()> {
+        py.detach(|| self.inner.out_pulse(port, value, ms)).map_err(err)
+    }
+
+    /// 0x2F84 laser port switch. Purpose not established.
+    #[pyo3(signature = (p1=0, p2=0, p3=0, p4=0, p5=0, p6=0))]
+    fn laser_port_switch(&mut self, py: Python<'_>, p1: u16, p2: u16, p3: u16, p4: u16, p5: u16, p6: u16) -> PyResult<()> {
+        py.detach(|| self.inner.laser_port_switch(p1, p2, p3, p4, p5, p6)).map_err(err)
+    }
+
+    /// The 16-bit word at bytes 5..6 of the 0x0101 reply.
+    fn status_word(&mut self, py: Python<'_>) -> Option<u16> {
+        py.detach(|| self.inner.status_word())
+    }
+
+    // ---- millimetres -----------------------------------------------------
+
+    #[pyo3(signature = (start=(0.0, 0.0), speed=200, clamp=false))]
+    fn begin_mm(&mut self, py: Python<'_>, start: (f64, f64), speed: u16, clamp: bool) -> PyResult<()> {
+        let p = self.inner.mm(start.0, start.1, clamp).map_err(PyValueError::new_err)?;
+        py.detach(|| self.inner.begin(p, speed)).map_err(err)
+    }
+
+    #[pyo3(signature = (x_mm, y_mm, speed=0x2710, delay=0x01F4, clamp=false))]
+    fn jump_mm(&mut self, py: Python<'_>, x_mm: f64, y_mm: f64, speed: u16, delay: u16, clamp: bool) -> PyResult<()> {
+        let p = self.inner.mm(x_mm, y_mm, clamp).map_err(PyValueError::new_err)?;
+        py.detach(|| self.inner.jump(p.0, p.1, speed, delay)).map_err(err)
+    }
+
+    #[pyo3(signature = (points_mm, speed=200, delay=500, clamp=false))]
+    fn lines_mm(&mut self, py: Python<'_>, points_mm: Vec<(f64, f64)>, speed: u16, delay: u16, clamp: bool) -> PyResult<()> {
+        let pts = self.mm_points(&points_mm, clamp)?;
+        py.detach(|| self.inner.lines(&pts, speed, delay)).map_err(err)
+    }
+
+    /// path() with points, run-up and wiggle in millimetres.
+    #[pyo3(signature = (points_mm, lit=None, speed=None, mm_s=None, jump_speed=0x2710,
+                        jump_delay=0x01F4, delay=500, corner_delay=0, overshoot_mm=0.0,
+                        wiggle_mm=0.0, wiggle_pitch_mm=0.0, wiggle_steps=16,
+                        unlit_at_feed=false, clamp=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn path_mm(
+        &mut self,
+        py: Python<'_>,
+        points_mm: Vec<(f64, f64)>,
+        lit: Option<Vec<bool>>,
+        speed: Option<u16>,
+        mm_s: Option<f64>,
+        jump_speed: u16,
+        jump_delay: u16,
+        delay: u16,
+        corner_delay: u16,
+        overshoot_mm: f64,
+        wiggle_mm: f64,
+        wiggle_pitch_mm: f64,
+        wiggle_steps: u32,
+        unlit_at_feed: bool,
+        clamp: bool,
+    ) -> PyResult<Py<PyDict>> {
+        let sp = speed_of(speed, mm_s)?;
+        let pts = self.mm_points(&points_mm, clamp)?;
+        let opts = PathOpts {
+            jump_speed,
+            jump_delay,
+            delay,
+            corner_delay,
+            overshoot: self.inner.counts(overshoot_mm, "run-up"),
+            wiggle: self.inner.counts(wiggle_mm, "wiggle radius"),
+            wiggle_pitch: self.inner.counts(wiggle_pitch_mm, "wiggle pitch"),
+            wiggle_steps,
+            unlit_at_feed,
+        };
+        let out = py
+            .detach(|| self.inner.path(&pts, lit.as_deref(), sp, opts))
+            .map_err(PyValueError::new_err)?;
+        emitted(py, out)
+    }
+
+    /// segments() with points, run-up and wiggle in millimetres.
+    #[pyo3(signature = (segs_mm, speed=None, mm_s=None, jump_speed=0x2710, jump_delay=0x01F4,
+                        delay=500, corner_delay=0, overshoot_mm=0.0, wiggle_mm=0.0,
+                        wiggle_pitch_mm=0.0, wiggle_steps=16, unlit_at_feed=false, clamp=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn segments_mm(
+        &mut self,
+        py: Python<'_>,
+        segs_mm: Vec<((f64, f64), (f64, f64))>,
+        speed: Option<u16>,
+        mm_s: Option<f64>,
+        jump_speed: u16,
+        jump_delay: u16,
+        delay: u16,
+        corner_delay: u16,
+        overshoot_mm: f64,
+        wiggle_mm: f64,
+        wiggle_pitch_mm: f64,
+        wiggle_steps: u32,
+        unlit_at_feed: bool,
+        clamp: bool,
+    ) -> PyResult<Py<PyDict>> {
+        let sp = speed_of(speed, mm_s)?;
+        let mut segs = Vec::with_capacity(segs_mm.len());
+        for (a, b) in &segs_mm {
+            segs.push((
+                self.inner.mm(a.0, a.1, clamp).map_err(PyValueError::new_err)?,
+                self.inner.mm(b.0, b.1, clamp).map_err(PyValueError::new_err)?,
+            ));
+        }
+        let opts = PathOpts {
+            jump_speed,
+            jump_delay,
+            delay,
+            corner_delay,
+            overshoot: self.inner.counts(overshoot_mm, "run-up"),
+            wiggle: self.inner.counts(wiggle_mm, "wiggle radius"),
+            wiggle_pitch: self.inner.counts(wiggle_pitch_mm, "wiggle pitch"),
+            wiggle_steps,
+            unlit_at_feed,
+        };
+        let out = py
+            .detach(|| self.inner.segments(&segs, sp, opts))
+            .map_err(PyValueError::new_err)?;
+        emitted(py, out)
+    }
+
+    /// dots() with points in millimetres. UNTESTED on hardware.
+    #[pyo3(signature = (points_mm, dwell_us, jump_speed=0x2710, jump_delay=0x01F4, clamp=false))]
+    fn dots_mm(
+        &mut self,
+        py: Python<'_>,
+        points_mm: Vec<(f64, f64)>,
+        dwell_us: u16,
+        jump_speed: u16,
+        jump_delay: u16,
+        clamp: bool,
+    ) -> PyResult<Py<PyDict>> {
+        let pts = self.mm_points(&points_mm, clamp)?;
+        let opts = PathOpts {
+            jump_speed,
+            jump_delay,
+            ..PathOpts::default()
+        };
+        let out = py
+            .detach(|| self.inner.dots(&pts, dwell_us, opts))
+            .map_err(PyValueError::new_err)?;
+        emitted(py, out)
+    }
+
     // ---- safety ----------------------------------------------------------
 
     /// Silence every laser output: marking PWM, tickle, gate.
@@ -511,6 +753,15 @@ impl PyJob {
     fn __exit__(&mut self, py: Python<'_>, _args: &Bound<'_, pyo3::types::PyTuple>) -> bool {
         py.detach(|| self.inner.close(true));
         false
+    }
+}
+
+impl PyJob {
+    /// Millimetre points to counts, refusing anything outside the field.
+    fn mm_points(&self, pts: &[(f64, f64)], clamp: bool) -> PyResult<Vec<(u16, u16)>> {
+        pts.iter()
+            .map(|(x, y)| self.inner.mm(*x, *y, clamp).map_err(PyValueError::new_err))
+            .collect()
     }
 }
 
